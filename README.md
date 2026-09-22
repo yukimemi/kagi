@@ -112,6 +112,7 @@ every platform.
 kagi run      # capture and remap (default)
 kagi check    # parse the config and print the rules that apply here
 kagi watch    # print key events as they arrive, to discover key names
+kagi service  # install | uninstall | status | start | stop
 kagi update   # install the latest release (--check to only look)
 ```
 
@@ -120,6 +121,41 @@ kagi update   # install the latest release (--check to only look)
 ```
 down  ctrl-[             (keycode=0x21 flags=0x20040000)
 ```
+
+## Run it at login
+
+```sh
+kagi service install
+```
+
+kagi is a daemon, so this registers the mechanism each platform actually
+wants rather than one generic autostart entry. Everything is per-user; none
+of it needs root.
+
+| | mechanism | why not the obvious one |
+|---|---|---|
+| macOS | launchd LaunchAgent | `ProcessType = Interactive` keeps launchd from throttling keyboard handling behind background QoS |
+| Linux | systemd user unit, `PartOf=graphical-session.target` | kagi *grabs* evdev devices, so it has to come up and go down with the session; a `.desktop` autostart entry gives no ordering and no restart-on-failure |
+| Windows | logon scheduled task driving a `wscript` shim | a console binary launched from the Startup folder leaves a window on screen for as long as the daemon runs |
+
+`install` compiles your config first and refuses to register a service that
+would die on startup. Pass `--config` to bake a non-default path into the
+registration.
+
+`kagi service status` reports registration and run state; `uninstall`,
+`start` and `stop` do what they say.
+
+On macOS the agent is a different binary from the terminal you installed
+from, and permission is granted **per binary**, so the first run fails until
+`~/.cargo/bin/kagi` is added under System Settings ▸ Privacy & Security ▸
+**Accessibility** *and* **Input Monitoring**. Then
+`launchctl kickstart -k gui/$(id -u)/com.yukimemi.kagi`. Logs go to
+`~/Library/Logs/kagi.log`.
+
+The generated agent sets `KAGI_NO_AUTOUPDATE=1` deliberately: macOS keys
+those grants to the binary, so a silent self-update would swap it out and
+leave the agent running without being able to see any key — and with nothing
+in the foreground, no prompt. Update deliberately with `kagi update`.
 
 ## How each platform does it
 

@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod keys;
 mod platform;
+mod service;
 #[cfg(feature = "self-update")]
 mod updater;
 
@@ -35,6 +36,11 @@ enum Command {
     Check,
     /// Print key events as they arrive, to discover key names.
     Watch,
+    /// Run kagi in the background from login onward.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Update kagi to the latest release.
     #[cfg(feature = "self-update")]
     Update {
@@ -50,6 +56,23 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Register the login service and start it.
+    ///
+    /// launchd agent on macOS, systemd user unit on Linux, logon task on
+    /// Windows. Always per-user; never needs root.
+    Install,
+    /// Stop the service and remove its registration.
+    Uninstall,
+    /// Show whether it is registered and running.
+    Status,
+    /// Start (or restart) the registered service.
+    Start,
+    /// Stop the running service without unregistering it.
+    Stop,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -63,6 +86,27 @@ fn main() -> Result<()> {
     }) = cli.command
     {
         return updater::run_self_update(yes, check, non_interactive);
+    }
+
+    // Only `install` needs a config, and it wants one that actually compiles:
+    // a service that dies on startup fails where nobody is watching.
+    if let Some(Command::Service { action }) = &cli.command {
+        return match action {
+            ServiceAction::Install => {
+                let path = match &cli.config {
+                    Some(p) => p.clone(),
+                    None => config::default_path()?,
+                };
+                Config::load(&path)?
+                    .rules_for(std::env::consts::OS)
+                    .with_context(|| format!("compiling {}", path.display()))?;
+                service::install(cli.config.as_deref())
+            }
+            ServiceAction::Uninstall => service::uninstall(),
+            ServiceAction::Status => service::status(),
+            ServiceAction::Start => service::start(),
+            ServiceAction::Stop => service::stop(),
+        };
     }
 
     let path = match cli.config {
@@ -118,6 +162,7 @@ fn main() -> Result<()> {
             platform::run(Engine::new(rules), &cfg)
         }
         // Handled before the config is loaded.
+        Command::Service { .. } => unreachable!("dispatched above"),
         #[cfg(feature = "self-update")]
         Command::Update { .. } => unreachable!("dispatched above"),
     }
