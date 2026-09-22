@@ -107,3 +107,24 @@ pub fn run(engine: Engine, config: &Config) -> Result<()> {
 pub fn watch(config: &Config) -> Result<()> {
     imp::watch(config)
 }
+
+/// Ask the OS for whatever kagi needs to capture keys, and report whether it
+/// has it. Safe to call repeatedly.
+#[cfg(target_os = "macos")]
+pub fn request_permissions() -> Result<bool> {
+    imp::request_permissions(imp::Prompt::Always)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_permissions() -> Result<bool> {
+    // Only macOS gates capture behind a per-binary grant that has to be
+    // requested before the binary even appears in the settings list. Linux
+    // needs device permissions, which `kagi run` already reports with the
+    // exact remedy, and a Windows hook needs nothing below its own integrity
+    // level.
+    println!(
+        "no per-binary permission grant is required on {}",
+        std::env::consts::OS
+    );
+    Ok(true)
+}

@@ -19,6 +19,7 @@ use crate::keys::{Chord, Key, Mods};
 use crate::platform::{Emitter, dispatch};
 use anyhow::{Result, anyhow, bail};
 use core_foundation::base::TCFType;
+use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::mach_port::CFMachPortRef;
 use core_foundation::runloop::{CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes};
@@ -35,6 +36,7 @@ use foreign_types::ForeignType;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::ptr;
 
 /// Stamped into `kCGEventSourceUserData` on every event we synthesize so the
@@ -73,7 +75,26 @@ unsafe extern "C" {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
-    fn AXIsProcessTrusted() -> Boolean;
+    /// The prompting variant. Beyond showing the dialog, it is what makes the
+    /// caller *appear* in the Accessibility list — an entry you otherwise have
+    /// to add by hand with the file picker.
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> Boolean;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+}
+
+/// `kIOHIDRequestTypeListenEvent` — reading other processes' key events, which
+/// is what an event tap does.
+const KIOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
+/// `kIOHIDAccessTypeGranted`.
+const KIOHID_ACCESS_TYPE_GRANTED: u32 = 0;
+/// `kIOHIDAccessTypeUnknown` — never asked, so asking is what registers kagi
+/// in the Input Monitoring list.
+const KIOHID_ACCESS_TYPE_UNKNOWN: u32 = 2;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOHIDCheckAccess(request_type: u32) -> u32;
+    fn IOHIDRequestAccess(request_type: u32) -> bool;
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -693,13 +714,23 @@ fn install(ctx: Box<Context>, options: u32, callback: TapCallback) -> Result<()>
         )
     };
     if port.is_null() {
-        // SAFETY: plain FFI call, no arguments.
-        let trusted = unsafe { AXIsProcessTrusted() } != 0;
+        // Registering in the two Privacy lists is the whole difficulty, and
+        // this is the moment we know it is needed — so ask instead of only
+        // printing instructions.
+        let ok = request_permissions(Prompt::Once)?;
         bail!(
-            "CGEventTapCreate failed (accessibility trusted: {trusted}).\n\
-             Grant the binary — or the terminal launching it — access under\n\
-             System Settings > Privacy & Security > Accessibility, and\n\
-             > Input Monitoring, then run kagi again."
+            "CGEventTapCreate failed.\n\
+             {}\n\
+             kagi has been added to System Settings > Privacy & Security >\n\
+             Accessibility and > Input Monitoring; tick it in both, then start\n\
+             kagi again.",
+            if ok {
+                "Both permissions report as granted, which usually means they were\n\
+                 granted to a previous build of this binary — toggle each entry off\n\
+                 and on again."
+            } else {
+                "The settings panes have been opened."
+            }
         );
     }
     // SAFETY: `ctx` is the leaked pointer above; `port` is owned by us now.
@@ -723,6 +754,105 @@ fn install(ctx: Box<Context>, options: u32, callback: TapCallback) -> Result<()>
 
     CFRunLoop::run_current();
     Ok(())
+}
+
+/// Whether a permission check may interact with the user.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Prompt {
+    /// Explicit request: always prompt and open the settings panes.
+    Always,
+    /// Automatic request from a failing start. Prompts only for a permission
+    /// that has never been asked for, because a launchd agent with
+    /// `KeepAlive` respawns on every failure — prompting unconditionally
+    /// would bury the screen in dialogs while the user is in the middle of
+    /// ticking the checkbox.
+    Once,
+}
+
+/// Path whose existence records that the Accessibility prompt has been shown.
+///
+/// Input Monitoring needs no such marker: `IOHIDCheckAccess` distinguishes
+/// "never asked" from "denied". The Accessibility API only answers
+/// trusted/not, so the one-shot has to be tracked here.
+fn ax_prompt_marker() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("kagi")
+            .join("accessibility-prompted"),
+    )
+}
+
+/// Ask macOS for the two grants an event tap needs, and report whether both
+/// are in place.
+///
+/// The point is not the dialog — it is that both calls **register kagi in the
+/// respective Privacy & Security list**. Without them a binary that has never
+/// asked simply does not appear there, and the only way in is the file picker
+/// via the `+` button, pointed at a path like `~/.cargo/bin`.
+pub fn request_permissions(prompt: Prompt) -> Result<bool> {
+    // SAFETY: plain FFI. `IOHIDCheckAccess` reports granted / denied /
+    // never-asked; only the last one is worth a prompt when automatic.
+    let access = unsafe { IOHIDCheckAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT) };
+    let input_monitoring = if access == KIOHID_ACCESS_TYPE_GRANTED {
+        true
+    } else if prompt == Prompt::Always || access == KIOHID_ACCESS_TYPE_UNKNOWN {
+        // SAFETY: plain FFI; shows the prompt and registers the entry.
+        unsafe { IOHIDRequestAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT) }
+    } else {
+        false
+    };
+
+    let marker = ax_prompt_marker();
+    let ax_asked = marker.as_ref().is_some_and(|m| m.exists());
+    let ax_prompt = prompt == Prompt::Always || !ax_asked;
+    // SAFETY: the global is a constant CFStringRef (Get rule); the dictionary
+    // outlives the call.
+    let accessibility = unsafe {
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let options = CFDictionary::from_CFType_pairs(&[(
+            key.as_CFType(),
+            CFBoolean::from(ax_prompt).as_CFType(),
+        )]);
+        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0
+    };
+    if ax_prompt && !accessibility {
+        if let Some(m) = marker {
+            if let Some(dir) = m.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&m, b"");
+        }
+    }
+
+    println!(
+        "accessibility:   {}\ninput monitoring: {}",
+        granted(accessibility),
+        granted(input_monitoring)
+    );
+
+    // A denied or already-dismissed grant produces no dialog at all, so an
+    // explicit request jumps straight to the pane that needs a checkbox.
+    if prompt == Prompt::Always {
+        if !accessibility {
+            open_privacy_pane("Privacy_Accessibility");
+        }
+        if !input_monitoring {
+            open_privacy_pane("Privacy_ListenEvent");
+        }
+    }
+    Ok(accessibility && input_monitoring)
+}
+
+fn granted(ok: bool) -> &'static str {
+    if ok { "granted" } else { "NOT granted" }
+}
+
+fn open_privacy_pane(anchor: &str) {
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
+    let _ = std::process::Command::new("open").arg(&url).status();
 }
 
 fn context(engine: Engine, config: &Config) -> Result<Box<Context>> {

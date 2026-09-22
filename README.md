@@ -109,11 +109,12 @@ every platform.
 ## Commands
 
 ```sh
-kagi run      # capture and remap (default)
-kagi check    # parse the config and print the rules that apply here
-kagi watch    # print key events as they arrive, to discover key names
-kagi service  # install | uninstall | status | start | stop
-kagi update   # install the latest release (--check to only look)
+kagi run         # capture and remap (default)
+kagi check       # parse the config and print the rules that apply here
+kagi watch       # print key events as they arrive, to discover key names
+kagi service     # install | uninstall | status | start | stop
+kagi permissions # request the OS grants kagi needs, and report what is missing
+kagi update      # install the latest release (--check to only look)
 ```
 
 `kagi watch` is the way to find the name of a key your keyboard actually sends:
@@ -145,17 +146,27 @@ registration.
 `kagi service status` reports registration and run state; `uninstall`,
 `start` and `stop` do what they say.
 
-On macOS the agent is a different binary from the terminal you installed
-from, and permission is granted **per binary**, so the first run fails until
-`~/.cargo/bin/kagi` is added under System Settings ▸ Privacy & Security ▸
-**Accessibility** *and* **Input Monitoring**. Then
-`launchctl kickstart -k gui/$(id -u)/com.yukimemi.kagi`. Logs go to
+### macOS permissions
+
+An event tap needs **Accessibility** *and* **Input Monitoring**, and macOS
+grants both per binary — the agent is not the terminal you installed from, so
+its first run fails regardless of what your terminal is allowed to do.
+
+A binary that has never *asked* does not even appear in those lists; the only
+way in would be the `+` button and a file picker aimed at `~/.cargo/bin`. So
+kagi asks, through `IOHIDRequestAccess` and `AXIsProcessTrustedWithOptions`,
+which is what registers the entry. `kagi service install` does it for you,
+`kagi permissions` repeats it on demand, and a failing start does it once.
+
+Tick both entries, then `kagi service start`. Logs go to
 `~/Library/Logs/kagi.log`.
 
-The generated agent sets `KAGI_NO_AUTOUPDATE=1` deliberately: macOS keys
-those grants to the binary, so a silent self-update would swap it out and
-leave the agent running without being able to see any key — and with nothing
-in the foreground, no prompt. Update deliberately with `kagi update`.
+The grant is keyed to the binary's contents, so **replacing the binary
+invalidates it** — after a `cargo install` you have to toggle each entry off
+and on again. That is why the generated agent sets `KAGI_NO_AUTOUPDATE=1`: a
+silent self-update would swap the binary out and leave the agent running
+blind, with nothing in the foreground to prompt you. Update deliberately with
+`kagi update`.
 
 ## How each platform does it
 

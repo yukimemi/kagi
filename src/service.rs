@@ -142,6 +142,11 @@ mod imp {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- Until the Privacy grants are ticked, kagi exits immediately and launchd
+       respawns it. The 10s default turns that into a stream of restarts while
+       the user is still in System Settings. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
 
   <!-- Keyboard handling must not be throttled behind background QoS. -->
   <key>ProcessType</key>

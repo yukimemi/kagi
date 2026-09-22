@@ -41,6 +41,11 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Request the OS permissions kagi needs, and report what is missing.
+    ///
+    /// On macOS this is also what puts kagi into the Accessibility and Input
+    /// Monitoring lists, so it can be ticked at all.
+    Permissions,
     /// Update kagi to the latest release.
     #[cfg(feature = "self-update")]
     Update {
@@ -100,13 +105,20 @@ fn main() -> Result<()> {
                 Config::load(&path)?
                     .rules_for(std::env::consts::OS)
                     .with_context(|| format!("compiling {}", path.display()))?;
-                service::install(cli.config.as_deref())
+                service::install(cli.config.as_deref())?;
+                // The service will fail until the OS grants capture, so ask
+                // now, while a foreground process can still show the prompt.
+                platform::request_permissions().map(|_| ())
             }
             ServiceAction::Uninstall => service::uninstall(),
             ServiceAction::Status => service::status(),
             ServiceAction::Start => service::start(),
             ServiceAction::Stop => service::stop(),
         };
+    }
+
+    if let Some(Command::Permissions) = cli.command {
+        return platform::request_permissions().map(|_| ());
     }
 
     let path = match cli.config {
@@ -162,7 +174,7 @@ fn main() -> Result<()> {
             platform::run(Engine::new(rules), &cfg)
         }
         // Handled before the config is loaded.
-        Command::Service { .. } => unreachable!("dispatched above"),
+        Command::Service { .. } | Command::Permissions => unreachable!("dispatched above"),
         #[cfg(feature = "self-update")]
         Command::Update { .. } => unreachable!("dispatched above"),
     }
