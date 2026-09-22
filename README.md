@@ -24,7 +24,8 @@ tap plus Accessibility permission is enough.
 ## Install
 
 ```sh
-cargo install --path .
+cargo install kagikey    # the crate is `kagikey`; the binary is `kagi`
+cargo install --path .   # or from a checkout
 ```
 
 ## Configure

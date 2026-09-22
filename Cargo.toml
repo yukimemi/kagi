@@ -1,11 +1,20 @@
 [package]
-name = "kagi"
+name = "kagikey"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 description = "Cross-platform key mapper with first-class IME control"
 license = "MIT"
 repository = "https://github.com/yukimemi/kagi"
+readme = "README.md"
+keywords = ["keyboard", "remap", "ime", "keymap", "hotkey"]
+categories = ["command-line-utilities"]
+
+# `kagi` was already taken on crates.io by an unrelated key-value store, so the
+# crate is published as `kagikey`; the binary keeps the short name.
+[[bin]]
+name = "kagi"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
