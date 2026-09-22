@@ -142,11 +142,10 @@ mod imp {
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <!-- Until the Privacy grants are ticked, kagi exits immediately and launchd
-       respawns it. The 10s default turns that into a stream of restarts while
-       the user is still in System Settings. -->
-  <key>ThrottleInterval</key>
-  <integer>60</integer>
+  <!-- No ThrottleInterval override on purpose: `launchctl kickstart` blocks
+       until the job actually spawns, so raising it makes `kagi service start`
+       hang for that long. The repeated-prompt problem it would paper over is
+       already solved by asking for a permission only once. -->
 
   <!-- Keyboard handling must not be throttled behind background QoS. -->
   <key>ProcessType</key>
