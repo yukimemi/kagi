@@ -36,7 +36,7 @@ use foreign_types::ForeignType;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 /// Stamped into `kCGEventSourceUserData` on every event we synthesize so the
@@ -75,6 +75,8 @@ unsafe extern "C" {
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
+    /// Read-only: does not prompt, does not register kagi in any list.
+    fn AXIsProcessTrusted() -> Boolean;
     /// The prompting variant. Beyond showing the dialog, it is what makes the
     /// caller *appear* in the Accessibility list — an entry you otherwise have
     /// to add by hand with the file picker.
@@ -87,9 +89,6 @@ unsafe extern "C" {
 const KIOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
 /// `kIOHIDAccessTypeGranted`.
 const KIOHID_ACCESS_TYPE_GRANTED: u32 = 0;
-/// `kIOHIDAccessTypeUnknown` — never asked, so asking is what registers kagi
-/// in the Input Monitoring list.
-const KIOHID_ACCESS_TYPE_UNKNOWN: u32 = 2;
 
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
@@ -764,144 +763,367 @@ fn install(ctx: Box<Context>, options: u32, callback: TapCallback) -> Result<()>
 pub enum Prompt {
     /// Explicit request: always prompt and open the settings panes.
     Always,
-    /// Automatic request from a failing start. Prompts only for a permission
-    /// that has never been asked for, because a launchd agent with
-    /// `KeepAlive` respawns on every failure — prompting unconditionally
-    /// would bury the screen in dialogs while the user is in the middle of
-    /// ticking the checkbox.
+    /// Automatic request from a failing start. Interacts only if the last
+    /// automatic interaction was more than [`THROTTLE`] ago, because a
+    /// launchd agent with `KeepAlive` respawns every few seconds on failure —
+    /// interacting unconditionally would bury the screen in dialogs and
+    /// re-open the settings pane out from under someone mid-click.
     Once,
 }
 
-/// Path whose existence records that the Accessibility prompt has been shown.
+/// Minimum gap between automatic (`Prompt::Once`) interactions.
 ///
-/// Input Monitoring needs no such marker: `IOHIDCheckAccess` distinguishes
-/// "never asked" from "denied". The Accessibility API only answers
-/// trusted/not, so the one-shot has to be tracked here.
-fn ax_prompt_marker() -> Option<PathBuf> {
+/// Short enough that a grant revoked outside of a click — an OS update, or
+/// (observed) a reboot invalidating an ad-hoc-signed binary's Accessibility
+/// and Input Monitoring grants — is retried again soon after the next
+/// restart, without turning a `KeepAlive` respawn loop into a dialog storm.
+const THROTTLE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Path recording the last time an automatic permission check interacted
+/// with the user (prompted, or opened a settings pane).
+fn throttle_marker() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(
         PathBuf::from(home)
             .join("Library")
             .join("Application Support")
             .join("kagi")
-            .join("accessibility-prompted"),
+            .join("permission-check"),
     )
 }
 
-/// Signing identifier kagi pins itself to.
-const SIGN_ID: &str = "com.yukimemi.kagi";
+/// Whether this call may interact with the user, and record that it did.
+fn may_interact(prompt: Prompt) -> bool {
+    if prompt == Prompt::Always {
+        return true;
+    }
+    let Some(marker) = throttle_marker() else {
+        return true;
+    };
+    let stale = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age >= THROTTLE);
+    let due = stale || !marker.exists();
+    if due {
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&marker, b"");
+    }
+    due
+}
 
-/// Give the binary a stable ad-hoc signing identifier.
+/// Signing identifier kagi pins itself to.
+///
+/// Not `com.yukimemi.kagi`: that string was requested from this machine
+/// several times during development *before* the signing pipeline below was
+/// fully correct (the `-r=` flag-syntax bug, in particular, left many of
+/// those requests running against a mismatched/invalid signature). TCC
+/// records a decision (denied, in this case) the first time an identifier is
+/// ever asked about and never reconsiders it — `IOHIDRequestAccess` on an
+/// already-decided identity shows no dialog *and never creates a Privacy
+/// pane row*, so there was no way for the Input Monitoring list to ever show
+/// `com.yukimemi.kagi ` for the user to grant. `tccutil` cannot target an
+/// unbundled identifier for a surgical reset either. A never-before-seen
+/// identifier is the only way out that does not `tccutil reset` (and so
+/// revoke) every other application's grants.
+const SIGN_ID: &str = "com.yukimemi.kagi.agent";
+
+/// The `.app` bundle's `CFBundleIdentifier` — `service::imp::deploy` stamps
+/// this into `~/Applications/kagi.app/Contents/Info.plist` and signs the
+/// bundle with it as the designated requirement (see `deploy`'s own
+/// comment). Kept apart from [`SIGN_ID`] on purpose, even though both name
+/// the same logical agent: TCC tracks a *Bundle ID* (this one, resolved
+/// through the bundle's Info.plist) and a bare executable's *path identity*
+/// (`SIGN_ID`, pinned by [`ensure_stable_identity`]) as two entirely
+/// separate rows, confirmed independently `Update Access Record`-ing in
+/// `log show --predicate 'subsystem == "com.apple.TCC"'`. A `tccutil reset
+/// <service> <bundle-id>` in [`reset_permissions`] can only ever target this
+/// one — `tccutil` resolves its argument through LaunchServices, which only
+/// a real installed bundle answers to.
+pub(crate) const BUNDLE_ID: &str = "com.yukimemi.kagi.app";
+
+/// `LC_UUID`, patched to this fixed value by [`pin_macho_uuid`].
+///
+/// Any 16 bytes work; this is `sha256(b"com.yukimemi.kagi.agent")[..16]`,
+/// computed once and hard-coded rather than at build time, so the value is
+/// visible here rather than buried in a build script.
+const PINNED_UUID: [u8; 16] = [
+    0x10, 0x04, 0x83, 0xfb, 0x42, 0x22, 0xd1, 0xf6, 0xd4, 0x79, 0x75, 0x98, 0xc8, 0xce, 0xc7, 0xf4,
+];
+
+const MH_MAGIC_64: u32 = 0xfeed_facf;
+const LC_UUID: u32 = 0x1b;
+
+/// Overwrite `LC_UUID` in a Mach-O file, via an external `dd` process.
+///
+/// This is the actual fix, and the surprising part of the whole
+/// investigation (see [`ensure_stable_identity`]): TCC does not use
+/// `codesign`'s `--identifier` to identify a bundle-less Mach-O executable at
+/// all. It resolves identity from `LC_UUID`, which `rustc`/`ld64` mint fresh
+/// on every build — confirmed by comparing `otool -l | grep -A2 LC_UUID`
+/// output across two builds (different every time) against `log show
+/// --predicate 'subsystem == "com.apple.TCC"'` output, which showed the
+/// *responsible process identifier* tccd recorded as a linker-style
+/// `kagi-<hash>` string even immediately after `codesign --identifier
+/// com.yukimemi.kagi` — and, after this patch, as `com.yukimemi.kagi`
+/// instead.
+///
+/// `ld64 -no_uuid` (omit the load command) was tried first and rejected:
+/// dyld refuses to execute some binaries — observed on a build-script
+/// dependency — with "missing LC_UUID load command".
+///
+/// `file` must NOT be a binary that is currently executing: the kernel's
+/// code-signing enforcement SIGKILLs a process the moment *any* writer —
+/// itself, or an external tool like `dd` used here — changes bytes in its
+/// mapped, signed backing file. Confirmed by direct reproduction (exit 137)
+/// from `kagi permissions` patching its own live executable. That is why
+/// [`ensure_stable_identity`] never calls this on `current_exe()` directly;
+/// it always operates on an inert copy first.
+fn pin_macho_uuid(file: &Path) -> bool {
+    use std::io::Write;
+
+    let Ok(data) = std::fs::read(file) else {
+        return false;
+    };
+    if data.len() < 32 || u32::from_le_bytes(data[0..4].try_into().unwrap()) != MH_MAGIC_64 {
+        return false;
+    }
+    let ncmds = u32::from_le_bytes(data[16..20].try_into().unwrap()) as usize;
+    let sizeofcmds = u32::from_le_bytes(data[20..24].try_into().unwrap()) as usize;
+    let Some(end) = 32usize.checked_add(sizeofcmds).map(|e| e.min(data.len())) else {
+        return false;
+    };
+
+    let mut off = 32usize;
+    for _ in 0..ncmds {
+        if off + 8 > end {
+            return false;
+        }
+        let cmd = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());
+        let cmdsize = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize;
+        if cmdsize < 8 || off + cmdsize > end {
+            return false;
+        }
+        if cmd == LC_UUID && cmdsize == 24 {
+            let uuid_off = off + 8;
+            if data[uuid_off..uuid_off + 16] == PINNED_UUID {
+                return true; // already pinned
+            }
+            let Ok(mut dd) = std::process::Command::new("dd")
+                .args([
+                    &format!("of={}", file.display()),
+                    "bs=1",
+                    &format!("seek={uuid_off}"),
+                    "count=16",
+                    "conv=notrunc",
+                    "status=none",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            else {
+                return false;
+            };
+            if let Some(mut stdin) = dd.stdin.take() {
+                let _ = stdin.write_all(&PINNED_UUID);
+            }
+            return dd.wait().is_ok_and(|s| s.success());
+        }
+        off += cmdsize;
+    }
+    false
+}
+
+/// Whether `file`'s on-disk signature is valid *and* carries [`SIGN_ID`] as
+/// its designated requirement. Read-only — safe to call on a live,
+/// executing binary, unlike [`pin_macho_uuid`] and the `codesign --force`
+/// step in [`ensure_stable_identity`].
+fn has_valid_stable_signature(file: &Path) -> bool {
+    let verified = std::process::Command::new("codesign")
+        .args(["--verify", &file.display().to_string()])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !verified {
+        return false;
+    }
+    std::process::Command::new("codesign")
+        .args(["-d", "-r", "-", &file.display().to_string()])
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout).contains(&format!("identifier \"{SIGN_ID}\""))
+        })
+}
+
+/// Give the binary a stable identity: a fixed `LC_UUID` (what TCC actually
+/// keys a bundle-less executable's grant to), plus a `codesign` identifier
+/// and identifier-only Designated Requirement for good measure.
 ///
 /// `cargo` leaves a linker-signed ad-hoc signature whose identifier embeds a
-/// hash of the binary — `kagi-bef9cabe50a08b72`. TCC treats that as the app's
-/// identity, so **every rebuild looks like a different application**: the old
-/// grant goes stale and the Privacy list accumulates a new dead `kagi` row per
-/// build. Re-signing with a fixed identifier collapses that to one row.
+/// hash of the binary — `kagi-bef9cabe50a08b72` — and whose default
+/// Designated Requirement pins the cdhash rather than that identifier. Fixing
+/// only those two (via `--identifier` and `-r`) turned out not to be enough;
+/// see [`pin_macho_uuid`] for the part that actually mattered.
 ///
-/// Best-effort: a machine without the command line tools simply keeps the
-/// linker signature, which works, just untidily.
+/// Works on a **copy**, never on `current_exe()` directly, then swaps it in
+/// with [`std::fs::rename`]. This is the same reason every self-updater
+/// (including kaishin's own) replaces a running binary via a temp-file +
+/// rename rather than an in-place write: `rename` only repoints the
+/// directory entry, so the process currently executing off the *old* inode
+/// is untouched. Modifying that inode's bytes directly, even in a spawned
+/// child, gets the calling process SIGKILLed instead — see
+/// [`pin_macho_uuid`]'s doc comment for the reproduction.
+///
+/// Best-effort throughout: a machine without the command line tools, an
+/// unexpected Mach-O layout, or a cross-device temp dir simply leaves
+/// whatever `cargo` produced in place.
 fn ensure_stable_identity() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let current = std::process::Command::new("codesign")
-        .args(["-d", "-v", &exe.display().to_string()])
-        .output();
-    if let Ok(out) = current {
-        // `codesign -dv` reports on stderr.
-        let text = String::from_utf8_lossy(&out.stderr);
-        if text.contains(&format!("Identifier={SIGN_ID}")) {
-            return;
-        }
+    // Inside a real `.app` bundle (`kagi service install`'s deployment
+    // target since — see `service::imp::deploy`), TCC resolves identity via
+    // the bundle's own `CFBundleIdentifier`/Info.plist, not `LC_UUID` or a
+    // codesign `--identifier`/DR pinned on the bare executable. Patching the
+    // *executable's* signature here would actively break that: it un-seals
+    // the bundle (`codesign --verify` on the bundle then fails with "code
+    // has no resources but signature indicates they must be present"),
+    // observed directly when this ran unconditionally. `deploy`'s own
+    // `codesign --force --deep --sign -` on the whole bundle is complete on
+    // its own; nothing here is needed for it.
+    if exe.to_string_lossy().contains(".app/Contents/MacOS/") {
+        return;
     }
-    let _ = std::process::Command::new("codesign")
+    if has_valid_stable_signature(&exe) {
+        return;
+    }
+    let Some(dir) = exe.parent() else { return };
+    let tmp = dir.join(format!(".kagi-identity-{}", std::process::id()));
+    if std::fs::copy(&exe, &tmp).is_err() {
+        return;
+    }
+
+    pin_macho_uuid(&tmp);
+    // `-r=<expr>` is one argv entry: codesign's requirement flag takes its
+    // value joined with `=`, not as a separate following argument — passing
+    // `["-r", expr]` makes codesign treat `expr` as a requirements *file*
+    // path instead of inline text, and fail with "No such file or
+    // directory" / "invalid requirement specification".
+    let signed = std::process::Command::new("codesign")
         .args([
             "--force",
             "--sign",
             "-",
             "--identifier",
             SIGN_ID,
-            &exe.display().to_string(),
+            &format!("-r=designated => identifier \"{SIGN_ID}\""),
+            &tmp.display().to_string(),
         ])
-        .output();
+        .output()
+        .is_ok_and(|o| o.status.success());
+
+    if signed {
+        if let Ok(meta) = std::fs::metadata(&exe) {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+        // Same directory as `exe`, so this is an atomic same-filesystem
+        // rename: the process currently running from `exe`'s old inode is
+        // unaffected, and any *new* launch of the path gets the patched copy.
+        let _ = std::fs::rename(&tmp, &exe);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
-/// Clear the two Privacy lists wholesale, the scripted equivalent of pressing
-/// `−` on every row.
+/// Drop kagi's own Accessibility and Input Monitoring rows — the scripted
+/// equivalent of pressing `−` on just kagi's rows, not every application's.
 ///
-/// `tccutil` resolves its optional target through LaunchServices, so it only
-/// accepts a real bundle identifier; an unbundled CLI cannot be singled out
-/// (`tccutil reset Accessibility /path/to/kagi` answers "No such bundle
-/// identifier"). Resetting the whole service is therefore the only automated
-/// way to drop a stale row — and it drops every other application's grant for
-/// that service too, which is why this never runs unless asked for.
+/// Targets [`BUNDLE_ID`] specifically: `tccutil reset <service>
+/// <bundle-id>` resolves its target through LaunchServices, which only
+/// answers for a real, currently-installed bundle — confirmed directly, both
+/// that this now succeeds for `BUNDLE_ID` once `kagi service install` has
+/// deployed `~/Applications/kagi.app`, and that it still refuses a bare path
+/// or an identifier with no matching installed bundle ("No such bundle
+/// identifier", `OSStatus -10814`). This is the fix for a real, once painful
+/// problem: earlier in development, a **service-wide** `tccutil reset
+/// Accessibility` (no target — the only form that worked before the bundle
+/// existed) silently revoked *every other application's* grant for that
+/// service too, including an unrelated window manager's. `kagi service
+/// install` must have run first — this is a targeted fix for kagi's own
+/// stuck grant, not a way to get kagi *into* the list.
 pub fn reset_permissions() -> Result<()> {
     for service in ["Accessibility", "ListenEvent"] {
         let out = std::process::Command::new("tccutil")
-            .args(["reset", service])
+            .args(["reset", service, BUNDLE_ID])
             .output()
-            .with_context(|| format!("running tccutil reset {service}"))?;
+            .with_context(|| format!("running tccutil reset {service} {BUNDLE_ID}"))?;
         if !out.status.success() {
             bail!(
-                "tccutil reset {service} failed: {}",
+                "tccutil reset {service} {BUNDLE_ID} failed: {}\n\
+                 (run `kagi service install` first if it has not deployed \
+                 ~/Applications/kagi.app yet)",
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        println!("reset {service} for every application");
+        println!("reset {service} for {BUNDLE_ID}");
     }
-    // The one-shot guard describes a prompt that no longer counts.
-    if let Some(m) = ax_prompt_marker() {
+    // The throttle describes an interaction that no longer reflects reality.
+    if let Some(m) = throttle_marker() {
         let _ = std::fs::remove_file(m);
     }
     Ok(())
 }
 
-/// Ask macOS for the two grants an event tap needs, and report whether both
-/// are in place.
-///
-/// The point is not the dialog — it is that both calls **register kagi in the
-/// respective Privacy & Security list**. Without them a binary that has never
-/// asked simply does not appear there, and the only way in is the file picker
-/// via the `+` button, pointed at a path like `~/.cargo/bin`.
+/// Read-only: whether Accessibility is currently trusted, no prompt.
+fn ax_trusted() -> bool {
+    // SAFETY: plain FFI, no arguments.
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// Read-only: whether Input Monitoring is currently granted, no prompt.
+fn listen_event_granted() -> bool {
+    // SAFETY: plain FFI.
+    unsafe { IOHIDCheckAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT) == KIOHID_ACCESS_TYPE_GRANTED }
+}
+
 pub fn request_permissions(prompt: Prompt) -> Result<bool> {
     // Do this before asking: the identifier under which the grant is recorded
     // is the one the binary carries at the moment of the request.
     ensure_stable_identity();
 
+    let interact = may_interact(prompt);
+
     // SAFETY: plain FFI. `IOHIDCheckAccess` reports granted / denied /
-    // never-asked; only the last one is worth a prompt when automatic.
-    let access = unsafe { IOHIDCheckAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT) };
-    let input_monitoring = if access == KIOHID_ACCESS_TYPE_GRANTED {
+    // never-asked. `IOHIDRequestAccess` shows a system dialog only for
+    // never-asked; for an already-decided (denied) identity it shows no UI —
+    // but it still creates/refreshes the row in the Input Monitoring pane,
+    // which a denied identity otherwise never gets. Skipping the call for
+    // "already denied" (the previous behaviour) left Input Monitoring with
+    // **zero entries** — nothing for the user to even click — while
+    // Accessibility, whose `AXIsProcessTrustedWithOptions` call below is
+    // unconditional, did show a row. Call both the same way.
+    let input_monitoring = if listen_event_granted() {
         true
-    } else if prompt == Prompt::Always || access == KIOHID_ACCESS_TYPE_UNKNOWN {
-        // SAFETY: plain FFI; shows the prompt and registers the entry.
+    } else if interact {
+        // SAFETY: plain FFI.
         unsafe { IOHIDRequestAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT) }
     } else {
         false
     };
 
-    let marker = ax_prompt_marker();
-    let ax_asked = marker.as_ref().is_some_and(|m| m.exists());
-    let ax_prompt = prompt == Prompt::Always || !ax_asked;
     // SAFETY: the global is a constant CFStringRef (Get rule); the dictionary
     // outlives the call.
     let accessibility = unsafe {
         let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
         let options = CFDictionary::from_CFType_pairs(&[(
             key.as_CFType(),
-            CFBoolean::from(ax_prompt).as_CFType(),
+            CFBoolean::from(interact).as_CFType(),
         )]);
         AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0
     };
-    if ax_prompt && !accessibility {
-        if let Some(m) = marker {
-            if let Some(dir) = m.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&m, b"");
-        }
-    }
 
     println!(
         "accessibility:   {}\ninput monitoring: {}",
@@ -909,24 +1131,22 @@ pub fn request_permissions(prompt: Prompt) -> Result<bool> {
         granted(input_monitoring)
     );
 
-    // A denied or already-dismissed grant produces no dialog at all, so an
-    // explicit request jumps straight to the pane that needs a checkbox.
-    if prompt == Prompt::Always {
-        if !accessibility {
-            open_privacy_pane("Privacy_Accessibility");
-        }
-        if !input_monitoring {
-            open_privacy_pane("Privacy_ListenEvent");
-        }
-        // Re-arm the one-shot. An explicit request means the user is trying
-        // again, and the agent — whose grant is the one that matters, since
-        // it runs as kagi rather than as a terminal — must be free to prompt
-        // on its next start.
-        if !(accessibility && input_monitoring) {
-            if let Some(m) = ax_prompt_marker() {
-                let _ = std::fs::remove_file(m);
-            }
-        }
+    // `AXIsProcessTrustedWithOptions(prompt: true)` does not just show a
+    // dialog when not yet granted — it also navigates System Settings to
+    // the Accessibility pane itself, **asynchronously**, arriving *after*
+    // this call returns. Confirmed by direct reproduction: manually opening
+    // the Input Monitoring pane, then making only this AX call, flips the
+    // frontmost pane back to Accessibility a beat later regardless. Fighting
+    // that timing with our own `open_privacy_pane("Privacy_Accessibility")`
+    // is redundant (the OS already does it) and racy (two `open` calls back
+    // to back land on the first pane; the second is a no-op). So: never open
+    // Accessibility ourselves, and open Input Monitoring — the pane with no
+    // OS-driven navigation of its own — only after giving the OS's async
+    // Accessibility navigation time to land, so it is always what is left on
+    // screen.
+    if interact && !input_monitoring {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        open_privacy_pane("Privacy_ListenEvent");
     }
     Ok(accessibility && input_monitoring)
 }
@@ -938,6 +1158,154 @@ fn granted(ok: bool) -> &'static str {
 fn open_privacy_pane(anchor: &str) {
     let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
     let _ = std::process::Command::new("open").arg(&url).status();
+}
+
+/// How long [`ensure_permissions_interactive`] waits, per permission, for the
+/// user to flip the checkbox after opening Settings.
+const INTERACTIVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// AppleScript string-literal escaping: backslash first, so the quote
+/// escape's own backslash is not re-escaped.
+fn osascript_quote(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A native `display dialog` via `osascript` — the same "explain, then let
+/// the user drive System Settings themselves" pattern
+/// [paneru](https://github.com/karinushka/paneru) uses (`NSAlert` there;
+/// `osascript` here, to avoid pulling `objc2`/AppKit into a crate that
+/// otherwise only links CoreFoundation/CoreGraphics). `display dialog`
+/// blocks the calling thread until the user answers, which is the point:
+/// unlike [`request_permissions`]'s fire-and-forget prompts, the caller here
+/// knows *when* the user has moved on, instead of firing both platform
+/// prompts within milliseconds of each other and letting them race for the
+/// frontmost System Settings pane.
+///
+/// Returns whether `action` (not "Cancel") was clicked.
+fn ask(title: &str, message: &str, action: &str) -> bool {
+    let script = format!(
+        "display dialog \"{}\" with title \"{}\" buttons {{\"Cancel\", \"{}\"}} \
+         default button \"{}\" cancel button \"Cancel\" with icon caution",
+        osascript_quote(message),
+        osascript_quote(title),
+        osascript_quote(action),
+        osascript_quote(action),
+    );
+    // `cancel button` makes AppleScript raise on Cancel/Esc/window-close,
+    // which osascript reports as a non-zero exit — the boolean falls out of
+    // the exit status alone, no stdout parsing needed.
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Poll `granted` every 500 ms until it reports true or `timeout` elapses.
+fn wait_until(mut granted: impl FnMut() -> bool, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if granted() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// Interactive, synchronous permission setup for `kagi permissions` and
+/// `kagi service install` — commands a person is looking at right now.
+///
+/// Walks Accessibility, then Input Monitoring, **one at a time**: show our
+/// own dialog explaining what is needed, trigger the OS's own request (which
+/// is what registers kagi in that Privacy & Security list) only if the user
+/// agrees, then block polling the plain `AX`/`IOHID` check until it reports
+/// granted or [`INTERACTIVE_TIMEOUT`] passes.
+///
+/// This is the fix for a real race in the old fire-both-at-once design:
+/// `AXIsProcessTrustedWithOptions(prompt: true)` asynchronously navigates
+/// System Settings to Accessibility on its own, arriving *after* the call
+/// returns — confirmed by reproduction, opening Input Monitoring manually and
+/// then making only that one AX call flipped the frontmost pane back to
+/// Accessibility moments later regardless. Firing the Input Monitoring
+/// request a fixed 1.5 s afterward (see [`request_permissions`], still used
+/// by the non-interactive retry path) was a guess at that timing; doing the
+/// two permissions strictly in sequence, gated on the user actually finishing
+/// the first one, removes the guess entirely.
+///
+/// [`request_permissions`] (used by the daemon's own failing-start retry) is
+/// deliberately left as the fire-and-forget, non-blocking path: that one
+/// fires from a `KeepAlive` respawn loop that may run with nobody at the
+/// keyboard, where a modal dialog blocking for up to
+/// [`INTERACTIVE_TIMEOUT`] on every restart would be worse than the race it
+/// would fix.
+pub fn ensure_permissions_interactive() -> Result<bool> {
+    ensure_stable_identity();
+
+    if !ax_trusted() {
+        if ask(
+            "kagi needs Accessibility access",
+            "kagi remaps keys and drives your IME, which macOS gates behind \
+             Accessibility access.\n\n\
+             Click \u{201c}Open System Settings\u{201d}, then turn kagi on \
+             under Privacy & Security \u{2192} Accessibility.\n\n\
+             If kagi is already listed there but still is not working, \
+             remove it with the \u{2212} button, add it again with + (pick \
+             the kagi binary), then turn it on.\n\n\
+             kagi continues on its own once access is granted.",
+            "Open System Settings",
+        ) {
+            // SAFETY: the global is a constant CFStringRef (Get rule); the
+            // dictionary outlives the call. This is what registers kagi in
+            // the Accessibility list and shows the OS's own prompt.
+            unsafe {
+                let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+                let options = CFDictionary::from_CFType_pairs(&[(
+                    key.as_CFType(),
+                    CFBoolean::true_value().as_CFType(),
+                )]);
+                AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef());
+            }
+        }
+        if !wait_until(ax_trusted, INTERACTIVE_TIMEOUT) {
+            println!("accessibility:   NOT granted (timed out waiting)");
+            return Ok(false);
+        }
+    }
+    println!("accessibility:   granted");
+
+    if !listen_event_granted() {
+        if ask(
+            "kagi needs Input Monitoring access",
+            "kagi reads raw key events system-wide to remap them, which \
+             macOS gates behind Input Monitoring access.\n\n\
+             Click \u{201c}Open System Settings\u{201d}, then turn kagi on \
+             under Privacy & Security \u{2192} Input Monitoring.\n\n\
+             If kagi is already listed there but still is not working, \
+             remove it with the \u{2212} button, add it again with + (pick \
+             the kagi binary), then turn it on.\n\n\
+             kagi continues on its own once access is granted.",
+            "Open System Settings",
+        ) {
+            // SAFETY: plain FFI; registers kagi in the Input Monitoring list.
+            unsafe {
+                IOHIDRequestAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT);
+            }
+            // Unlike the Accessibility prompt, this one does not navigate
+            // System Settings on its own — Accessibility already had its
+            // turn and is done (we just finished waiting on it), so there is
+            // no second async navigation left to race.
+            open_privacy_pane("Privacy_ListenEvent");
+        }
+        if !wait_until(listen_event_granted, INTERACTIVE_TIMEOUT) {
+            println!("input monitoring: NOT granted (timed out waiting)");
+            return Ok(false);
+        }
+    }
+    println!("input monitoring: granted");
+
+    Ok(true)
 }
 
 fn context(engine: Engine, config: &Config) -> Result<Box<Context>> {

@@ -152,38 +152,50 @@ An event tap needs **Accessibility** *and* **Input Monitoring**, and macOS
 grants both per binary — the agent is not the terminal you installed from, so
 its first run fails regardless of what your terminal is allowed to do.
 
-A binary that has never *asked* does not even appear in those lists; the only
-way in would be the `+` button and a file picker aimed at `~/.cargo/bin`. So
-kagi asks, through `IOHIDRequestAccess` and `AXIsProcessTrustedWithOptions`,
-which is what registers the entry. `kagi service install` does it for you,
-`kagi permissions` repeats it on demand, and a failing start does it once.
+`kagi service install` deploys the agent to `~/Applications/kagi.app`
+(never `~/.cargo/bin/kagi` directly) and signs it with a fixed
+identifier, rather than running the raw binary as the launchd job. Two
+problems this fixes, together:
+
+* macOS keys a grant to the binary's **signing identifier**, and `cargo
+  build` leaves a linker ad-hoc signature whose identifier embeds a hash of
+  the binary (`kagi-bef9cabe50a08b72`) — a different one on every rebuild.
+  Left alone, every rebuild looks like a new application to TCC, so
+  yesterday's grant goes stale and the Privacy lists accumulate a dead
+  `kagi` row per build.
+* macOS also appears to key a grant to the binary's **path**, sometimes
+  permanently — an early `~/.cargo/bin/kagi` build asked while its signature
+  was still broken, and no amount of re-signing, re-toggling, or even
+  removing and re-adding the Settings row ever got that exact path working
+  again. A real, dedicated bundle escapes that path entirely.
+
+A binary that has never *asked* does not even appear in those lists; kagi
+asks for you, through `IOHIDRequestAccess` and `AXIsProcessTrustedWithOptions`,
+which is what creates the entry. `kagi service install` walks both
+permissions for you, one at a time with its own explanation dialog before
+each OS prompt; `kagi permissions` repeats the same flow on demand; a daemon
+that fails to start retries once in the background without a dialog.
 
 Tick both entries, then `kagi service start`. Logs go to
 `~/Library/Logs/kagi.log`.
 
-macOS keys the grant to the binary's **signing identifier**, not its path.
-`cargo build` leaves a linker ad-hoc signature whose identifier embeds a hash
-of the binary (`kagi-bef9cabe50a08b72`), so every rebuild looks like a
-different application to TCC — the old grant goes stale and the Privacy list
-accumulates a dead `kagi` row per build. `kagi permissions` re-signs the
-running binary with a fixed identifier (`com.yukimemi.kagi`) before asking,
-which keeps future rebuilds landing on the one row.
-
-A binary that predates this fix already has a stale row that no amount of
-toggling helps, because it isn't the one being checked anymore. `tccutil`
-resolves through LaunchServices and only accepts a real bundle identifier, so
-an unbundled CLI can't be singled out for a targeted reset — the only
-scripted fix is the whole service:
+If a permission ever gets stuck regardless (for instance, after a
+`codesign` regression re-introduces an unstable signature), fix it with:
 
 ```sh
-kagi permissions --reset   # tccutil reset Accessibility + ListenEvent —
-                            # clears the grant for *every* application
+kagi permissions --reset
 ```
 
-That is why the generated agent sets `KAGI_NO_AUTOUPDATE=1`: a silent
+This runs `tccutil reset <service> <kagi's bundle id>` — surgical, because
+`~/Applications/kagi.app` is a real, LaunchServices-registered bundle, unlike
+a bare CLI path. It clears only kagi's own Accessibility and Input
+Monitoring rows, never another application's grant for the same service.
+(`kagi service install` must have deployed the bundle first.)
+
+That is why the generated agent also sets `KAGI_NO_AUTOUPDATE=1`: a silent
 self-update would swap the binary out and leave the agent running blind, with
 nothing in the foreground to prompt you. Update deliberately with
-`kagi update`, then re-tick if `kagi service status` shows the agent failing.
+`kagi update`, then `kagi service install` again to redeploy the bundle.
 
 ## How each platform does it
 
@@ -196,9 +208,10 @@ nothing in the foreground to prompt you. Update deliberately with
 ### Permissions
 
 * **macOS** — System Settings ▸ Privacy & Security ▸ **Accessibility** and
-  **Input Monitoring**, for the kagi binary (or the terminal launching it).
-  Granting them requires restarting the granted app. Event taps are bypassed
-  while a secure input field has focus, and at the login window.
+  **Input Monitoring**, for `kagi.app` (`kagi service install`'s deployment
+  target) or the terminal launching `kagi run` directly. Granting them
+  requires restarting the granted process. Event taps are bypassed while a
+  secure input field has focus, and at the login window.
 * **Windows** — an elevated foreground window only receives hooked input if
   kagi runs elevated too.
 * **Linux** — read access to `/dev/input/event*` (`sudo usermod -aG input

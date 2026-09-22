@@ -46,13 +46,12 @@ enum Command {
     /// On macOS this is also what puts kagi into the Accessibility and Input
     /// Monitoring lists, so it can be ticked at all.
     Permissions {
-        /// First clear the existing grants, then ask again.
-        ///
-        /// macOS ties a grant to the binary's signature, so a rebuilt kagi
-        /// leaves a dead row that ticking does nothing for. `tccutil` cannot
-        /// target an unbundled CLI, so this clears **every application's**
-        /// Accessibility and Input Monitoring grant — the scripted equivalent
-        /// of pressing `−` on the whole list.
+        /// A rebuilt kagi's signature can leave a dead row that ticking
+        /// does nothing for — macOS then reports the checkbox as on while
+        /// kagi itself never sees capture access. This targets only kagi's
+        /// own rows (`tccutil reset <service> <kagi's bundle id>`, once
+        /// `kagi service install` has deployed `~/Applications/kagi.app`),
+        /// never another application's grant for the same service.
         #[arg(long)]
         reset: bool,
     },

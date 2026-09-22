@@ -108,11 +108,14 @@ pub fn watch(config: &Config) -> Result<()> {
     imp::watch(config)
 }
 
-/// Ask the OS for whatever kagi needs to capture keys, and report whether it
-/// has it. Safe to call repeatedly.
+/// Ask the OS for whatever kagi needs to capture keys, walking each
+/// permission to completion before moving to the next. Blocks until granted
+/// or the user gives up — this is for commands a person is looking at right
+/// now (`kagi permissions`, `kagi service install`), not the daemon's own
+/// background retry.
 #[cfg(target_os = "macos")]
 pub fn request_permissions() -> Result<bool> {
-    imp::request_permissions(imp::Prompt::Always)
+    imp::ensure_permissions_interactive()
 }
 
 /// Drop existing capture grants so they can be granted afresh.
@@ -120,6 +123,14 @@ pub fn request_permissions() -> Result<bool> {
 pub fn reset_permissions() -> Result<()> {
     imp::reset_permissions()
 }
+
+/// The `.app` bundle's `CFBundleIdentifier` — see `macos::BUNDLE_ID` for why
+/// it is a distinct constant from anything the raw-binary code-signing path
+/// uses. `service::imp` stamps it into the deployed bundle's Info.plist and
+/// signature; this module's own [`reset_permissions`] uses it as the
+/// `tccutil reset <service> <bundle-id>` target.
+#[cfg(target_os = "macos")]
+pub const BUNDLE_ID: &str = macos::BUNDLE_ID;
 
 #[cfg(not(target_os = "macos"))]
 pub fn reset_permissions() -> Result<()> {

@@ -89,6 +89,126 @@ mod imp {
             .join(format!("{LABEL}.plist")))
     }
 
+    /// Where the agent actually runs from: inside a real `.app` bundle at
+    /// `~/Applications/kagi.app`, never `current_exe()` (`~/.cargo/bin/kagi`)
+    /// directly.
+    ///
+    /// Two things pushed this here, both load-bearing:
+    ///
+    /// 1. **TCC keys an Accessibility/Input Monitoring grant to the
+    ///    executable path, not just its code signature**, and appears to
+    ///    cache that per-path association *permanently* — exhaustively
+    ///    confirmed on `~/.cargo/bin/kagi` during development: fixing the
+    ///    signature (stable identifier, stable `LC_UUID`, valid Designated
+    ///    Requirement — see `platform::macos::ensure_stable_identity`),
+    ///    switching to a never-before-seen identifier, and the user manually
+    ///    removing the Settings row with `−` and re-adding it with `+`, ALL
+    ///    still failed with the identical stale `SecStaticCodeCheckValidity`
+    ///    error (`errSecCSReqFailed`/`-67050` against a specific old
+    ///    `cdhash`), while an *identical* binary at a fresh path granted
+    ///    normally every time. `tccd` restart is SIP-blocked
+    ///    (`launchctl kickstart` on `com.apple.tccd` answers "Operation not
+    ///    permitted while System Integrity Protection is engaged"), and
+    ///    `tccutil reset <service> <path-or-identifier>` refuses anything
+    ///    that is not a real, LaunchServices-registered bundle identifier
+    ///    ("No such bundle identifier"). There is no user-space fix for a
+    ///    poisoned path; only moving off it works.
+    /// 2. A **real bundle**, not a bare copied executable, makes that
+    ///    `tccutil reset <service> <bundle-id>` command actually work if this
+    ///    path *ever* gets poisoned too — a targeted reset that, unlike
+    ///    `kagi permissions --reset`, does not revoke every other
+    ///    application's grants for the same service. Matches
+    ///    [paneru](https://github.com/karinushka/paneru)'s own
+    ///    `install-app`.
+    fn app_bundle() -> Result<PathBuf> {
+        Ok(home()?.join("Applications").join("kagi.app"))
+    }
+
+    fn app_executable() -> Result<PathBuf> {
+        Ok(app_bundle()?.join("Contents").join("MacOS").join("kagi"))
+    }
+
+    /// The bundle's `CFBundleIdentifier` — see `platform::macos::BUNDLE_ID`
+    /// for the full story on why it is its own constant, not [`LABEL`] and
+    /// not `crate::platform::SIGN_ID`.
+    use crate::platform::BUNDLE_ID;
+
+    fn info_plist() -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>{BUNDLE_ID}</string>
+  <key>CFBundleExecutable</key>
+  <string>kagi</string>
+  <key>CFBundleName</key>
+  <string>kagi</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>{version}</string>
+  <!-- No Dock icon, no menu bar: kagi has no UI of its own. -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
+"#,
+            version = env!("CARGO_PKG_VERSION"),
+        )
+    }
+
+    /// Copy the current binary into a freshly (re)written `~/Applications/
+    /// kagi.app`, so the registered service always runs the latest build
+    /// from its own dedicated, bundle-identified path.
+    fn deploy() -> Result<PathBuf> {
+        let src = exe()?;
+        let dst = app_executable()?;
+        write_file(
+            &app_bundle()?.join("Contents").join("Info.plist"),
+            &info_plist(),
+        )?;
+        if let Some(dir) = dst.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+        // Two overrides on top of plain ad-hoc `--sign -`, both load-bearing
+        // across a rebuild:
+        //
+        // * `--deep` covers the bundle as a whole; a bare `--sign` on just
+        //   the executable leaves Info.plist unsealed and `codesign
+        //   --verify` on the bundle fails with "bundle format unrecognized,
+        //   invalid, or unsuitable".
+        // * `-r=<expr>` pins the designated requirement to the identifier
+        //   alone. Ad-hoc signing's *default* designated requirement pins
+        //   the content hash instead (`designated => cdhash H"..."`),
+        //   confirmed with `codesign -d -r-` on a bundle signed without
+        //   this override — which changes on every `cargo install`/rebuild.
+        //   TCC's grant did not survive a rebuild without this override:
+        //   observed directly, a fresh `kagi service install` right after
+        //   one that had just been granted came back to `CGEventTapCreate
+        //   failed` / "NOT granted" again. Same fix, same reason, as
+        //   `ensure_stable_identity`'s `-r=` on the raw-binary path — see
+        //   its doc comment for the argv-joining gotcha (`-r=<expr>` must be
+        //   one argument, not two).
+        run(
+            "codesign",
+            &[
+                "--force",
+                "--deep",
+                "--sign",
+                "-",
+                "--identifier",
+                BUNDLE_ID,
+                &format!("-r=designated => identifier \"{BUNDLE_ID}\""),
+                &app_bundle()?.display().to_string(),
+            ],
+        )?;
+        Ok(dst)
+    }
+
     /// launchd addresses a per-user domain by uid. `id -u` avoids pulling in
     /// libc just for `getuid`.
     fn domain() -> Result<String> {
@@ -173,13 +293,20 @@ mod imp {
     }
 
     pub fn install(config: Option<&Path>) -> Result<()> {
+        // A concurrently respawning `KeepAlive` daemon calls
+        // `platform::macos::request_permissions(Prompt::Once)` on every
+        // failed start (a lightweight, non-blocking check+open) — running
+        // that at the same time as this function's own interactive,
+        // dialog-driven flow can pop two overlapping system prompts. Stop it
+        // first; `start()` at the end brings it back once permissions are in
+        // place.
+        run_quiet("launchctl", &["bootout", &target()?]);
+
+        let agent = deploy()?;
         let path = plist_path()?;
-        write_file(&path, &plist(&exe()?, config))?;
+        write_file(&path, &plist(&agent, config))?;
         println!("wrote {}", path.display());
 
-        // Replace any previous registration; `bootout` fails when nothing is
-        // loaded, which is fine.
-        run_quiet("launchctl", &["bootout", &target()?]);
         run(
             "launchctl",
             &["bootstrap", &domain()?, &path.display().to_string()],
@@ -194,6 +321,12 @@ mod imp {
         if path.exists() {
             std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
             println!("removed {}", path.display());
+        }
+        let bundle = app_bundle()?;
+        if bundle.exists() {
+            std::fs::remove_dir_all(&bundle)
+                .with_context(|| format!("removing {}", bundle.display()))?;
+            println!("removed {}", bundle.display());
         }
         println!("unloaded {}", target()?);
         Ok(())
@@ -245,7 +378,7 @@ mod imp {
              under System Settings > Privacy & Security > Accessibility, and again\n\
              under Input Monitoring. Then:\n  launchctl kickstart -k {}\n\
              Check progress with `kagi service status` and {}.",
-            exe()?.display(),
+            app_executable()?.display(),
             target()?,
             log_path().display()
         );
