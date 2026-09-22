@@ -524,18 +524,77 @@ mod imp {
         )
     }
 
+    fn current_user() -> Result<String> {
+        let user = std::env::var("USERNAME").context("USERNAME is not set")?;
+        Ok(match std::env::var("USERDOMAIN") {
+            Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+            _ => user,
+        })
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    /// Logon task for `user` only, running unelevated in the interactive
+    /// session. `ExecutionTimeLimit = PT0S` matters: the default would kill
+    /// the daemon after 72 hours, and the battery defaults would stop it on
+    /// unplug.
+    fn task_xml(user: &str, shim_file: &Path) -> String {
+        let user = xml_escape(user);
+        let shim = xml_escape(&shim_file.display().to_string());
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>wscript.exe</Command><Arguments>"{shim}"</Arguments></Exec>
+  </Actions>
+</Task>
+"#
+        )
+    }
+
     pub fn install(config: Option<&Path>) -> Result<()> {
         let shim_file = shim_path()?;
         write_file(&shim_file, &shim(&exe()?, config))?;
         println!("wrote {}", shim_file.display());
 
-        let action = format!("wscript.exe \"{}\"", shim_file.display());
-        run(
+        // `/SC ONLOGON` on the command line means "at logon of any user",
+        // which Task Scheduler reserves for administrators. A LogonTrigger
+        // scoped to the calling user is allowed unelevated, but schtasks only
+        // exposes that through `/XML`.
+        let xml_file = shim_file.with_extension("xml");
+        let xml = task_xml(&current_user()?, &shim_file);
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&xml_file, bytes)
+            .with_context(|| format!("writing {}", xml_file.display()))?;
+        let xml_arg = xml_file.to_string_lossy().into_owned();
+        let created = run(
             "schtasks",
-            &[
-                "/Create", "/TN", TASK, "/TR", &action, "/SC", "ONLOGON", "/RL", "LIMITED", "/F",
-            ],
-        )?;
+            &["/Create", "/TN", TASK, "/XML", &xml_arg, "/F"],
+        );
+        let _ = std::fs::remove_file(&xml_file);
+        created?;
         println!("registered logon task `{TASK}`");
         start()
     }
@@ -582,7 +641,8 @@ mod imp {
         println!(
             "\nA low-level keyboard hook cannot see input destined for a window\n\
              running at a higher integrity level. If remapping stops working in an\n\
-             elevated app, re-register with an elevated shell and `/RL HIGHEST`."
+             elevated app, set the `kagi` task to \"Run with highest privileges\"\n\
+             in Task Scheduler (needs an administrator)."
         );
         Ok(())
     }
