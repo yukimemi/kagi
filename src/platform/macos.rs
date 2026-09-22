@@ -17,7 +17,7 @@ use crate::config::{Config, MacImeMethod, MacosConfig};
 use crate::engine::{Decision, Engine};
 use crate::keys::{Chord, Key, Mods};
 use crate::platform::{Emitter, dispatch};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
@@ -716,20 +716,23 @@ fn install(ctx: Box<Context>, options: u32, callback: TapCallback) -> Result<()>
     if port.is_null() {
         // Registering in the two Privacy lists is the whole difficulty, and
         // this is the moment we know it is needed — so ask instead of only
-        // printing instructions.
+        // printing instructions. `Once` because a KeepAlive agent respawns on
+        // every failure and must not pile dialogs on top of the settings
+        // window the user is working in.
         let ok = request_permissions(Prompt::Once)?;
         bail!(
             "CGEventTapCreate failed.\n\
              {}\n\
-             kagi has been added to System Settings > Privacy & Security >\n\
-             Accessibility and > Input Monitoring; tick it in both, then start\n\
-             kagi again.",
+             kagi is registered under System Settings > Privacy & Security >\n\
+             Accessibility and > Input Monitoring. Tick it in both, then run\n\
+             `kagi service start`. `kagi permissions` re-opens the panes and\n\
+             asks again.",
             if ok {
-                "Both permissions report as granted, which usually means they were\n\
-                 granted to a previous build of this binary — toggle each entry off\n\
-                 and on again."
+                "Both permissions report as granted, which normally means they were\n\
+                 granted to a previous build of this binary: the grant is keyed to\n\
+                 the binary's contents, so toggle each entry off and on again."
             } else {
-                "The settings panes have been opened."
+                "Neither permission is granted yet."
             }
         );
     }
@@ -785,6 +788,75 @@ fn ax_prompt_marker() -> Option<PathBuf> {
     )
 }
 
+/// Signing identifier kagi pins itself to.
+const SIGN_ID: &str = "com.yukimemi.kagi";
+
+/// Give the binary a stable ad-hoc signing identifier.
+///
+/// `cargo` leaves a linker-signed ad-hoc signature whose identifier embeds a
+/// hash of the binary — `kagi-bef9cabe50a08b72`. TCC treats that as the app's
+/// identity, so **every rebuild looks like a different application**: the old
+/// grant goes stale and the Privacy list accumulates a new dead `kagi` row per
+/// build. Re-signing with a fixed identifier collapses that to one row.
+///
+/// Best-effort: a machine without the command line tools simply keeps the
+/// linker signature, which works, just untidily.
+fn ensure_stable_identity() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let current = std::process::Command::new("codesign")
+        .args(["-d", "-v", &exe.display().to_string()])
+        .output();
+    if let Ok(out) = current {
+        // `codesign -dv` reports on stderr.
+        let text = String::from_utf8_lossy(&out.stderr);
+        if text.contains(&format!("Identifier={SIGN_ID}")) {
+            return;
+        }
+    }
+    let _ = std::process::Command::new("codesign")
+        .args([
+            "--force",
+            "--sign",
+            "-",
+            "--identifier",
+            SIGN_ID,
+            &exe.display().to_string(),
+        ])
+        .output();
+}
+
+/// Clear the two Privacy lists wholesale, the scripted equivalent of pressing
+/// `−` on every row.
+///
+/// `tccutil` resolves its optional target through LaunchServices, so it only
+/// accepts a real bundle identifier; an unbundled CLI cannot be singled out
+/// (`tccutil reset Accessibility /path/to/kagi` answers "No such bundle
+/// identifier"). Resetting the whole service is therefore the only automated
+/// way to drop a stale row — and it drops every other application's grant for
+/// that service too, which is why this never runs unless asked for.
+pub fn reset_permissions() -> Result<()> {
+    for service in ["Accessibility", "ListenEvent"] {
+        let out = std::process::Command::new("tccutil")
+            .args(["reset", service])
+            .output()
+            .with_context(|| format!("running tccutil reset {service}"))?;
+        if !out.status.success() {
+            bail!(
+                "tccutil reset {service} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        println!("reset {service} for every application");
+    }
+    // The one-shot guard describes a prompt that no longer counts.
+    if let Some(m) = ax_prompt_marker() {
+        let _ = std::fs::remove_file(m);
+    }
+    Ok(())
+}
+
 /// Ask macOS for the two grants an event tap needs, and report whether both
 /// are in place.
 ///
@@ -793,6 +865,10 @@ fn ax_prompt_marker() -> Option<PathBuf> {
 /// asked simply does not appear there, and the only way in is the file picker
 /// via the `+` button, pointed at a path like `~/.cargo/bin`.
 pub fn request_permissions(prompt: Prompt) -> Result<bool> {
+    // Do this before asking: the identifier under which the grant is recorded
+    // is the one the binary carries at the moment of the request.
+    ensure_stable_identity();
+
     // SAFETY: plain FFI. `IOHIDCheckAccess` reports granted / denied /
     // never-asked; only the last one is worth a prompt when automatic.
     let access = unsafe { IOHIDCheckAccess(KIOHID_REQUEST_TYPE_LISTEN_EVENT) };
@@ -841,6 +917,15 @@ pub fn request_permissions(prompt: Prompt) -> Result<bool> {
         }
         if !input_monitoring {
             open_privacy_pane("Privacy_ListenEvent");
+        }
+        // Re-arm the one-shot. An explicit request means the user is trying
+        // again, and the agent — whose grant is the one that matters, since
+        // it runs as kagi rather than as a terminal — must be free to prompt
+        // on its next start.
+        if !(accessibility && input_monitoring) {
+            if let Some(m) = ax_prompt_marker() {
+                let _ = std::fs::remove_file(m);
+            }
         }
     }
     Ok(accessibility && input_monitoring)

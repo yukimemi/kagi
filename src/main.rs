@@ -45,7 +45,17 @@ enum Command {
     ///
     /// On macOS this is also what puts kagi into the Accessibility and Input
     /// Monitoring lists, so it can be ticked at all.
-    Permissions,
+    Permissions {
+        /// First clear the existing grants, then ask again.
+        ///
+        /// macOS ties a grant to the binary's signature, so a rebuilt kagi
+        /// leaves a dead row that ticking does nothing for. `tccutil` cannot
+        /// target an unbundled CLI, so this clears **every application's**
+        /// Accessibility and Input Monitoring grant — the scripted equivalent
+        /// of pressing `−` on the whole list.
+        #[arg(long)]
+        reset: bool,
+    },
     /// Update kagi to the latest release.
     #[cfg(feature = "self-update")]
     Update {
@@ -117,7 +127,10 @@ fn main() -> Result<()> {
         };
     }
 
-    if let Some(Command::Permissions) = cli.command {
+    if let Some(Command::Permissions { reset }) = cli.command {
+        if reset {
+            platform::reset_permissions()?;
+        }
         return platform::request_permissions().map(|_| ());
     }
 
@@ -174,7 +187,7 @@ fn main() -> Result<()> {
             platform::run(Engine::new(rules), &cfg)
         }
         // Handled before the config is loaded.
-        Command::Service { .. } | Command::Permissions => unreachable!("dispatched above"),
+        Command::Service { .. } | Command::Permissions { .. } => unreachable!("dispatched above"),
         #[cfg(feature = "self-update")]
         Command::Update { .. } => unreachable!("dispatched above"),
     }

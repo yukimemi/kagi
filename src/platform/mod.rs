@@ -115,6 +115,17 @@ pub fn request_permissions() -> Result<bool> {
     imp::request_permissions(imp::Prompt::Always)
 }
 
+/// Drop existing capture grants so they can be granted afresh.
+#[cfg(target_os = "macos")]
+pub fn reset_permissions() -> Result<()> {
+    imp::reset_permissions()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reset_permissions() -> Result<()> {
+    anyhow::bail!("--reset only applies to macOS Privacy & Security grants")
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn request_permissions() -> Result<bool> {
     // Only macOS gates capture behind a per-binary grant that has to be

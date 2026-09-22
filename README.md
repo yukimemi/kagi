@@ -161,12 +161,29 @@ which is what registers the entry. `kagi service install` does it for you,
 Tick both entries, then `kagi service start`. Logs go to
 `~/Library/Logs/kagi.log`.
 
-The grant is keyed to the binary's contents, so **replacing the binary
-invalidates it** — after a `cargo install` you have to toggle each entry off
-and on again. That is why the generated agent sets `KAGI_NO_AUTOUPDATE=1`: a
-silent self-update would swap the binary out and leave the agent running
-blind, with nothing in the foreground to prompt you. Update deliberately with
-`kagi update`.
+macOS keys the grant to the binary's **signing identifier**, not its path.
+`cargo build` leaves a linker ad-hoc signature whose identifier embeds a hash
+of the binary (`kagi-bef9cabe50a08b72`), so every rebuild looks like a
+different application to TCC — the old grant goes stale and the Privacy list
+accumulates a dead `kagi` row per build. `kagi permissions` re-signs the
+running binary with a fixed identifier (`com.yukimemi.kagi`) before asking,
+which keeps future rebuilds landing on the one row.
+
+A binary that predates this fix already has a stale row that no amount of
+toggling helps, because it isn't the one being checked anymore. `tccutil`
+resolves through LaunchServices and only accepts a real bundle identifier, so
+an unbundled CLI can't be singled out for a targeted reset — the only
+scripted fix is the whole service:
+
+```sh
+kagi permissions --reset   # tccutil reset Accessibility + ListenEvent —
+                            # clears the grant for *every* application
+```
+
+That is why the generated agent sets `KAGI_NO_AUTOUPDATE=1`: a silent
+self-update would swap the binary out and leave the agent running blind, with
+nothing in the foreground to prompt you. Update deliberately with
+`kagi update`, then re-tick if `kagi service status` shows the agent failing.
 
 ## How each platform does it
 
