@@ -4,14 +4,29 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Cross-platform key mapper with first-class IME control"
+authors = ["yukimemi"]
 license = "MIT"
-repository = "https://github.com/yukimemi/kagi"
 readme = "README.md"
+repository = "https://github.com/yukimemi/kagi"
+homepage = "https://github.com/yukimemi/kagi"
 keywords = ["keyboard", "remap", "ime", "keymap", "hotkey"]
 categories = ["command-line-utilities"]
+include = [
+    "src/**/*.rs",
+    "config/kagi.toml",
+    "examples/*.rs",
+    "assets/icon.svg",
+    "assets/logo.svg",
+    "assets/logo-dark.svg",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
 
-# `kagi` was already taken on crates.io by an unrelated key-value store, so the
-# crate is published as `kagikey`; the binary keeps the short name.
+# The sibling convention is `<name>-cli` for the package and `<name>` for the
+# binary (yui ships as `yui-cli`). `kagi-cli` is taken on crates.io by an
+# unrelated Kagi.com API client, and plain `kagi` by an abandoned key-value
+# store, so the package is `kagikey`; the binary keeps the short name.
 [[bin]]
 name = "kagi"
 path = "src/main.rs"
