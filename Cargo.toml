@@ -20,7 +20,10 @@ path = "src/main.rs"
 anyhow = "1"
 bitflags = "2"
 clap = { version = "4", features = ["derive"] }
+kaishin = "0.7.5"
 serde = { version = "1", features = ["derive"] }
+teravars = { version = "0.2.2", features = ["merge"] }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 toml = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]

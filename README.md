@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/yukimemi/kagi/main/assets/logo-dark.svg">
+    <img src="https://raw.githubusercontent.com/yukimemi/kagi/main/assets/logo.svg" alt="kagi — cross-platform key mapper with first-class IME control" width="540">
+  </picture>
+</p>
+
 # kagi
 
 Cross-platform key mapper with **IME on/off as a first-class action**.

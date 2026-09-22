@@ -10,6 +10,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// teravars' own input. Declared only so `deny_unknown_fields` accepts a
+    /// `[vars]` table; the values reach the template through teravars, not
+    /// through here.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub vars: toml::Table,
     #[serde(default)]
     pub rule: Vec<RuleSpec>,
     // Each of these is read only by its own backend, so the other targets see
@@ -82,14 +88,36 @@ pub struct LinuxConfig {
 }
 
 impl Config {
+    /// Load a config file through teravars: Tera rendering, `[vars]`
+    /// resolution and `include` all happen before serde sees the TOML.
+    ///
+    /// That is what makes one config file serve three platforms — the `os`
+    /// field handles whole rules, but device paths and IME commands differ
+    /// per machine, and `{{ system.os }}` / `{{ system.host }}` let one file
+    /// cover them without a second file per host.
     pub fn load(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading config {}", path.display()))?;
-        Config::parse(&text).with_context(|| format!("parsing config {}", path.display()))
+        let mut engine = teravars::Engine::default();
+        let ctx = teravars::system_context();
+        let merged = teravars::load_merged([path], &mut engine, &ctx)
+            .with_context(|| format!("rendering config {}", path.display()))?;
+        // `load_merged` carves `[vars]` out of the table it returns, so the
+        // remaining keys are exactly the ones `Config` declares.
+        toml::Value::Table(merged.config)
+            .try_into()
+            .with_context(|| format!("parsing config {}", path.display()))
     }
 
+    /// Render and parse config text directly. Same pipeline as [`load`], for
+    /// sources that are not a file.
+    ///
+    /// [`load`]: Config::load
     pub fn parse(text: &str) -> Result<Config> {
-        Ok(toml::from_str(text)?)
+        let mut engine = teravars::Engine::default();
+        let mut vars = teravars::extract_vars(text)?;
+        teravars::resolve(&mut vars, &mut engine)?;
+        let mut ctx = teravars::system_context();
+        ctx.insert("vars", &vars);
+        Ok(toml::from_str(&engine.render_toml(text, &ctx)?)?)
     }
 
     /// Compile the rules that apply to the running platform.

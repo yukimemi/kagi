@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="kagi — cross-platform key mapper with first-class IME control">
+  <title>One keypress fans out to every platform</title>
+  <!--
+    鍵 (kagi) — "key". The sibling of magi's mark, run the other way:
+    magi collapses three candidates into one verdict, kagi takes one
+    keypress and fans it out.
+
+    A keycap at the top is the physical key. Its stem drops into the gold
+    diamond — the fleet's shared decision accent, here the rule that matched.
+    Three coloured paths leave the diamond for three discs: macOS, Windows,
+    Linux. Same key, same rule, three very different ways of getting there.
+  -->
+  <g fill="none" stroke-width="18" stroke-linecap="round">
+    <!-- keycap — the physical key -->
+    <rect x="101" y="12" width="54" height="54" rx="14" stroke="#1a1a1a" />
+    <!-- stem into the rule -->
+    <path d="M 128 78 L 128 100" stroke="#1a1a1a" />
+    <!-- macOS — rust -->
+    <path d="M 50 190 C 50 146, 78 134, 128 112" stroke="#c5582d" />
+    <!-- Windows — teal -->
+    <path d="M 128 190 L 128 112" stroke="#0a7e8c" />
+    <!-- Linux — violet -->
+    <path d="M 206 190 C 206 146, 178 134, 128 112" stroke="#7d4b9e" />
+  </g>
+  <!-- the rule that matched -->
+  <rect x="111" y="95" width="34" height="34"
+        transform="rotate(45 128 112)"
+        fill="#c9a227" />
+  <circle cx="50"  cy="216" r="21" fill="#c5582d" />
+  <circle cx="128" cy="216" r="21" fill="#0a7e8c" />
+  <circle cx="206" cy="216" r="21" fill="#7d4b9e" />
+</svg>
