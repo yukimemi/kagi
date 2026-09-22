@@ -10,16 +10,16 @@ use crate::action::ImeState;
 use crate::config::Config;
 use crate::engine::{Decision, Engine, ModTracker};
 use crate::keys::{Chord, Key, Mods};
-use crate::platform::{dispatch, Emitter};
-use anyhow::{anyhow, bail, Result};
+use crate::platform::{Emitter, dispatch};
+use anyhow::{Result, anyhow, bail};
 use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use windows_sys::Win32::Foundation::{
-    GetLastError, BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    BOOL, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows_sys::Win32::System::Console::{
-    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
+    CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, SetConsoleCtrlHandler,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
@@ -29,9 +29,9 @@ use windows_sys::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
 // `INPUT`, `KEYBDINPUT`, the `KEYEVENTF_*` flags and `MapVirtualKeyW`.
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetForegroundWindow, GetGUIThreadInfo, GetMessageW, PostThreadMessageW,
-    SendMessageTimeoutW, SetWindowsHookExW, UnhookWindowsHookEx, GUITHREADINFO, HC_ACTION, HHOOK,
-    HOOKPROC, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, SMTO_ABORTIFHUNG, WH_KEYBOARD_LL, WM_KEYDOWN,
+    CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetMessageW, HC_ACTION,
+    HHOOK, HOOKPROC, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, PostThreadMessageW, SMTO_ABORTIFHUNG,
+    SendMessageTimeoutW, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN,
     WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
@@ -75,56 +75,117 @@ const ZENKAKU_VKS: &[u16] = &[VK_KANJI, VK_OEM_AUTO, VK_OEM_ENLW, VK_PROCESSKEY]
 /// [`JIS_TABLE`] and the sided/generic modifiers plus `VK_RETURN` are handled
 /// directly in [`to_key`] and [`from_key`].
 const VK_TABLE: &[(u16, Key)] = &[
-    (VK_A, Key::A), (VK_B, Key::B), (VK_C, Key::C), (VK_D, Key::D),
-    (VK_E, Key::E), (VK_F, Key::F), (VK_G, Key::G), (VK_H, Key::H),
-    (VK_I, Key::I), (VK_J, Key::J), (VK_K, Key::K), (VK_L, Key::L),
-    (VK_M, Key::M), (VK_N, Key::N), (VK_O, Key::O), (VK_P, Key::P),
-    (VK_Q, Key::Q), (VK_R, Key::R), (VK_S, Key::S), (VK_T, Key::T),
-    (VK_U, Key::U), (VK_V, Key::V), (VK_W, Key::W), (VK_X, Key::X),
-    (VK_Y, Key::Y), (VK_Z, Key::Z),
-
-    (VK_0, Key::Num0), (VK_1, Key::Num1), (VK_2, Key::Num2),
-    (VK_3, Key::Num3), (VK_4, Key::Num4), (VK_5, Key::Num5),
-    (VK_6, Key::Num6), (VK_7, Key::Num7), (VK_8, Key::Num8),
+    (VK_A, Key::A),
+    (VK_B, Key::B),
+    (VK_C, Key::C),
+    (VK_D, Key::D),
+    (VK_E, Key::E),
+    (VK_F, Key::F),
+    (VK_G, Key::G),
+    (VK_H, Key::H),
+    (VK_I, Key::I),
+    (VK_J, Key::J),
+    (VK_K, Key::K),
+    (VK_L, Key::L),
+    (VK_M, Key::M),
+    (VK_N, Key::N),
+    (VK_O, Key::O),
+    (VK_P, Key::P),
+    (VK_Q, Key::Q),
+    (VK_R, Key::R),
+    (VK_S, Key::S),
+    (VK_T, Key::T),
+    (VK_U, Key::U),
+    (VK_V, Key::V),
+    (VK_W, Key::W),
+    (VK_X, Key::X),
+    (VK_Y, Key::Y),
+    (VK_Z, Key::Z),
+    (VK_0, Key::Num0),
+    (VK_1, Key::Num1),
+    (VK_2, Key::Num2),
+    (VK_3, Key::Num3),
+    (VK_4, Key::Num4),
+    (VK_5, Key::Num5),
+    (VK_6, Key::Num6),
+    (VK_7, Key::Num7),
+    (VK_8, Key::Num8),
     (VK_9, Key::Num9),
-
-    (VK_F1, Key::F1), (VK_F2, Key::F2), (VK_F3, Key::F3), (VK_F4, Key::F4),
-    (VK_F5, Key::F5), (VK_F6, Key::F6), (VK_F7, Key::F7), (VK_F8, Key::F8),
-    (VK_F9, Key::F9), (VK_F10, Key::F10), (VK_F11, Key::F11),
-    (VK_F12, Key::F12), (VK_F13, Key::F13), (VK_F14, Key::F14),
-    (VK_F15, Key::F15), (VK_F16, Key::F16), (VK_F17, Key::F17),
-    (VK_F18, Key::F18), (VK_F19, Key::F19), (VK_F20, Key::F20),
-
-    (VK_OEM_3, Key::Grave), (VK_OEM_MINUS, Key::Minus),
-    (VK_OEM_PLUS, Key::Equal), (VK_OEM_4, Key::LeftBracket),
-    (VK_OEM_6, Key::RightBracket), (VK_OEM_5, Key::Backslash),
-    (VK_OEM_1, Key::Semicolon), (VK_OEM_7, Key::Quote),
-    (VK_OEM_COMMA, Key::Comma), (VK_OEM_PERIOD, Key::Period),
+    (VK_F1, Key::F1),
+    (VK_F2, Key::F2),
+    (VK_F3, Key::F3),
+    (VK_F4, Key::F4),
+    (VK_F5, Key::F5),
+    (VK_F6, Key::F6),
+    (VK_F7, Key::F7),
+    (VK_F8, Key::F8),
+    (VK_F9, Key::F9),
+    (VK_F10, Key::F10),
+    (VK_F11, Key::F11),
+    (VK_F12, Key::F12),
+    (VK_F13, Key::F13),
+    (VK_F14, Key::F14),
+    (VK_F15, Key::F15),
+    (VK_F16, Key::F16),
+    (VK_F17, Key::F17),
+    (VK_F18, Key::F18),
+    (VK_F19, Key::F19),
+    (VK_F20, Key::F20),
+    (VK_OEM_3, Key::Grave),
+    (VK_OEM_MINUS, Key::Minus),
+    (VK_OEM_PLUS, Key::Equal),
+    (VK_OEM_4, Key::LeftBracket),
+    (VK_OEM_6, Key::RightBracket),
+    (VK_OEM_5, Key::Backslash),
+    (VK_OEM_1, Key::Semicolon),
+    (VK_OEM_7, Key::Quote),
+    (VK_OEM_COMMA, Key::Comma),
+    (VK_OEM_PERIOD, Key::Period),
     (VK_OEM_2, Key::Slash),
-
-    (VK_ESCAPE, Key::Escape), (VK_TAB, Key::Tab), (VK_CAPITAL, Key::CapsLock),
-    (VK_SPACE, Key::Space), (VK_BACK, Key::Backspace),
-    (VK_INSERT, Key::Insert), (VK_DELETE, Key::Delete),
-    (VK_HOME, Key::Home), (VK_END, Key::End),
-    (VK_PRIOR, Key::PageUp), (VK_NEXT, Key::PageDown),
-    (VK_LEFT, Key::Left), (VK_RIGHT, Key::Right),
-    (VK_UP, Key::Up), (VK_DOWN, Key::Down),
-    (VK_SNAPSHOT, Key::PrintScreen), (VK_SCROLL, Key::ScrollLock),
-    (VK_PAUSE, Key::Pause), (VK_APPS, Key::Menu), (VK_NUMLOCK, Key::NumLock),
-
-    (VK_LCONTROL, Key::LeftCtrl), (VK_RCONTROL, Key::RightCtrl),
-    (VK_LSHIFT, Key::LeftShift), (VK_RSHIFT, Key::RightShift),
-    (VK_LMENU, Key::LeftAlt), (VK_RMENU, Key::RightAlt),
-    (VK_LWIN, Key::LeftMeta), (VK_RWIN, Key::RightMeta),
-
-    (VK_NUMPAD0, Key::Numpad0), (VK_NUMPAD1, Key::Numpad1),
-    (VK_NUMPAD2, Key::Numpad2), (VK_NUMPAD3, Key::Numpad3),
-    (VK_NUMPAD4, Key::Numpad4), (VK_NUMPAD5, Key::Numpad5),
-    (VK_NUMPAD6, Key::Numpad6), (VK_NUMPAD7, Key::Numpad7),
-    (VK_NUMPAD8, Key::Numpad8), (VK_NUMPAD9, Key::Numpad9),
-    (VK_ADD, Key::NumpadPlus), (VK_SUBTRACT, Key::NumpadMinus),
-    (VK_MULTIPLY, Key::NumpadMultiply), (VK_DIVIDE, Key::NumpadDivide),
-    (VK_DECIMAL, Key::NumpadDot), (VK_OEM_NEC_EQUAL, Key::NumpadEqual),
+    (VK_ESCAPE, Key::Escape),
+    (VK_TAB, Key::Tab),
+    (VK_CAPITAL, Key::CapsLock),
+    (VK_SPACE, Key::Space),
+    (VK_BACK, Key::Backspace),
+    (VK_INSERT, Key::Insert),
+    (VK_DELETE, Key::Delete),
+    (VK_HOME, Key::Home),
+    (VK_END, Key::End),
+    (VK_PRIOR, Key::PageUp),
+    (VK_NEXT, Key::PageDown),
+    (VK_LEFT, Key::Left),
+    (VK_RIGHT, Key::Right),
+    (VK_UP, Key::Up),
+    (VK_DOWN, Key::Down),
+    (VK_SNAPSHOT, Key::PrintScreen),
+    (VK_SCROLL, Key::ScrollLock),
+    (VK_PAUSE, Key::Pause),
+    (VK_APPS, Key::Menu),
+    (VK_NUMLOCK, Key::NumLock),
+    (VK_LCONTROL, Key::LeftCtrl),
+    (VK_RCONTROL, Key::RightCtrl),
+    (VK_LSHIFT, Key::LeftShift),
+    (VK_RSHIFT, Key::RightShift),
+    (VK_LMENU, Key::LeftAlt),
+    (VK_RMENU, Key::RightAlt),
+    (VK_LWIN, Key::LeftMeta),
+    (VK_RWIN, Key::RightMeta),
+    (VK_NUMPAD0, Key::Numpad0),
+    (VK_NUMPAD1, Key::Numpad1),
+    (VK_NUMPAD2, Key::Numpad2),
+    (VK_NUMPAD3, Key::Numpad3),
+    (VK_NUMPAD4, Key::Numpad4),
+    (VK_NUMPAD5, Key::Numpad5),
+    (VK_NUMPAD6, Key::Numpad6),
+    (VK_NUMPAD7, Key::Numpad7),
+    (VK_NUMPAD8, Key::Numpad8),
+    (VK_NUMPAD9, Key::Numpad9),
+    (VK_ADD, Key::NumpadPlus),
+    (VK_SUBTRACT, Key::NumpadMinus),
+    (VK_MULTIPLY, Key::NumpadMultiply),
+    (VK_DIVIDE, Key::NumpadDivide),
+    (VK_DECIMAL, Key::NumpadDot),
+    (VK_OEM_NEC_EQUAL, Key::NumpadEqual),
 ];
 
 /// Keys the system prefixes with `E0` in the scan-code stream, i.e. the ones
@@ -185,11 +246,27 @@ fn to_key(vk: u32, sc: u32, extended: bool) -> Option<Key> {
         // synthesized or remapped event can still carry the generic one.
         // Right Ctrl and right Alt are `E0`-prefixed; right Shift is not, so
         // it has to be told apart by scan code.
-        VK_CONTROL => Some(if extended { Key::RightCtrl } else { Key::LeftCtrl }),
-        VK_MENU => Some(if extended { Key::RightAlt } else { Key::LeftAlt }),
-        VK_SHIFT => Some(if sc == 0x36 { Key::RightShift } else { Key::LeftShift }),
+        VK_CONTROL => Some(if extended {
+            Key::RightCtrl
+        } else {
+            Key::LeftCtrl
+        }),
+        VK_MENU => Some(if extended {
+            Key::RightAlt
+        } else {
+            Key::LeftAlt
+        }),
+        VK_SHIFT => Some(if sc == 0x36 {
+            Key::RightShift
+        } else {
+            Key::LeftShift
+        }),
         // Numpad Enter shares VK_RETURN with the main Enter key.
-        VK_RETURN => Some(if extended { Key::NumpadEnter } else { Key::Enter }),
+        VK_RETURN => Some(if extended {
+            Key::NumpadEnter
+        } else {
+            Key::Enter
+        }),
         _ => VK_TABLE.iter().find(|(v, _)| *v == vk).map(|(_, k)| *k),
     }
 }
@@ -436,7 +513,12 @@ fn focus_window() -> HWND {
         hwndMenuOwner: ptr::null_mut(),
         hwndMoveSize: ptr::null_mut(),
         hwndCaret: ptr::null_mut(),
-        rcCaret: RECT { left: 0, top: 0, right: 0, bottom: 0 },
+        rcCaret: RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        },
     };
     // SAFETY: `info` is a valid GUITHREADINFO with `cbSize` filled in, which
     // is the only precondition; thread id 0 asks about the foreground thread.
@@ -585,7 +667,9 @@ fn handle(message: u32, lparam: LPARAM) -> bool {
             Decision::Pass => false,
             Decision::Consume => true,
             Decision::Run { index, passthrough } => {
-                let RunState { engine, emitter, .. } = state;
+                let RunState {
+                    engine, emitter, ..
+                } = state;
                 if let Err(err) = dispatch(emitter, engine.actions(index)) {
                     eprintln!("kagi: {err:#}");
                 }

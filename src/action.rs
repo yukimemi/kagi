@@ -1,7 +1,7 @@
 //! What a matched rule does.
 
 use crate::keys::Chord;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,15 +78,24 @@ mod tests {
 
     #[test]
     fn parses_each_action_form() {
-        assert_eq!(Action::parse("ime:off").unwrap(), Action::Ime(ImeState::Off));
+        assert_eq!(
+            Action::parse("ime:off").unwrap(),
+            Action::Ime(ImeState::Off)
+        );
         assert_eq!(
             Action::parse("source:com.apple.keylayout.ABC").unwrap(),
             Action::InputSource("com.apple.keylayout.ABC".into())
         );
-        assert_eq!(Action::parse("cmd:notify-send hi").unwrap(), Action::Cmd("notify-send hi".into()));
+        assert_eq!(
+            Action::parse("cmd:notify-send hi").unwrap(),
+            Action::Cmd("notify-send hi".into())
+        );
         assert_eq!(
             Action::parse("esc").unwrap(),
-            Action::Tap(Chord { key: Key::Escape, mods: Mods::empty() })
+            Action::Tap(Chord {
+                key: Key::Escape,
+                mods: Mods::empty()
+            })
         );
     }
 

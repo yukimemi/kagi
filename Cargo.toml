@@ -1,8 +1,8 @@
 [package]
 name = "kagikey"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.82"
+edition = "2024"
+rust-version = "1.85"
 description = "Cross-platform key mapper with first-class IME control"
 license = "MIT"
 repository = "https://github.com/yukimemi/kagi"
@@ -16,15 +16,28 @@ categories = ["command-line-utilities"]
 name = "kagi"
 path = "src/main.rs"
 
+# `self-update` pulls kaishin, and through it reqwest/rustls/aws-lc-sys, which
+# needs a C toolchain. Turning it off yields a pure-Rust build — what a distro
+# package wants (the package manager owns updates), and what makes
+# `cargo check --target <other-os> --no-default-features` work from any host.
+[features]
+default = ["self-update"]
+self-update = ["dep:kaishin", "dep:tokio"]
+
 [dependencies]
 anyhow = "1"
 bitflags = "2"
 clap = { version = "4", features = ["derive"] }
-kaishin = "0.7.5"
+kaishin = { version = "0.7.5", optional = true }
 serde = { version = "1", features = ["derive"] }
 teravars = { version = "0.2.2", features = ["merge"] }
-tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "time", "macros"] }
-toml = "0.8"
+tokio = { version = "1.53.1", features = [
+  "rt",
+  "rt-multi-thread",
+  "time",
+  "macros",
+], optional = true }
+toml = "1.1.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

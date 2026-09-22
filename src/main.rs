@@ -3,6 +3,7 @@ mod config;
 mod engine;
 mod keys;
 mod platform;
+#[cfg(feature = "self-update")]
 mod updater;
 
 use anyhow::{Context, Result};
@@ -35,6 +36,7 @@ enum Command {
     /// Print key events as they arrive, to discover key names.
     Watch,
     /// Update kagi to the latest release.
+    #[cfg(feature = "self-update")]
     Update {
         /// Report whether a newer release exists, then stop.
         #[arg(long)]
@@ -53,7 +55,13 @@ fn main() -> Result<()> {
 
     // Updating must work even when the config is missing or broken — that is
     // often the reason to update in the first place.
-    if let Some(Command::Update { check, yes, non_interactive }) = cli.command {
+    #[cfg(feature = "self-update")]
+    if let Some(Command::Update {
+        check,
+        yes,
+        non_interactive,
+    }) = cli.command
+    {
         return updater::run_self_update(yes, check, non_interactive);
     }
 
@@ -68,7 +76,12 @@ fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Run) {
         Command::Check => {
-            println!("{}: {} rule(s) for {}", path.display(), rules.len(), std::env::consts::OS);
+            println!(
+                "{}: {} rule(s) for {}",
+                path.display(),
+                rules.len(),
+                std::env::consts::OS
+            );
             for rule in &rules {
                 let flags = match (rule.passthrough, rule.wildcard_mods) {
                     (true, true) => "~*",
@@ -79,7 +92,11 @@ fn main() -> Result<()> {
                 let actions = if rule.actions.is_empty() {
                     "<swallow>".to_string()
                 } else {
-                    rule.actions.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" ")
+                    rule.actions
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 };
                 print!("  {flags}{} -> {actions}", rule.trigger);
                 match &rule.description {
@@ -96,10 +113,12 @@ fn main() -> Result<()> {
             }
             // `run` never returns, so a "new version available" banner would
             // never print. Update silently instead; it applies next launch.
+            #[cfg(feature = "self-update")]
             updater::spawn_auto_update();
             platform::run(Engine::new(rules), &cfg)
         }
         // Handled before the config is loaded.
+        #[cfg(feature = "self-update")]
         Command::Update { .. } => unreachable!("dispatched above"),
     }
 }

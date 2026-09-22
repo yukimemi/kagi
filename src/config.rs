@@ -3,16 +3,16 @@
 use crate::action::Action;
 use crate::engine::Rule;
 use crate::keys::Chord;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// teravars' own input. Declared only so `deny_unknown_fields` accepts a
-    /// `[vars]` table; the values reach the template through teravars, not
-    /// through here.
+    /// teravars' own input, which it leaves in the merged table rather than
+    /// carving out. Declared so `deny_unknown_fields` accepts `[vars]`; the
+    /// values reach the template through teravars, never through here.
     #[serde(default)]
     #[allow(dead_code)]
     pub vars: toml::Table,
@@ -100,24 +100,11 @@ impl Config {
         let ctx = teravars::system_context();
         let merged = teravars::load_merged([path], &mut engine, &ctx)
             .with_context(|| format!("rendering config {}", path.display()))?;
-        // `load_merged` carves `[vars]` out of the table it returns, so the
-        // remaining keys are exactly the ones `Config` declares.
+        // `load_merged` leaves `[vars]` in the table it returns; `Config` declares
+        // the field so `deny_unknown_fields` still holds.
         toml::Value::Table(merged.config)
             .try_into()
             .with_context(|| format!("parsing config {}", path.display()))
-    }
-
-    /// Render and parse config text directly. Same pipeline as [`load`], for
-    /// sources that are not a file.
-    ///
-    /// [`load`]: Config::load
-    pub fn parse(text: &str) -> Result<Config> {
-        let mut engine = teravars::Engine::default();
-        let mut vars = teravars::extract_vars(text)?;
-        teravars::resolve(&mut vars, &mut engine)?;
-        let mut ctx = teravars::system_context();
-        ctx.insert("vars", &vars);
-        Ok(toml::from_str(&engine.render_toml(text, &ctx)?)?)
     }
 
     /// Compile the rules that apply to the running platform.
@@ -194,7 +181,12 @@ fn candidate_paths() -> Vec<PathBuf> {
         out.push(PathBuf::from(xdg).join("kagi").join("kagi.toml"));
     }
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        out.push(PathBuf::from(home).join(".config").join("kagi").join("kagi.toml"));
+        out.push(
+            PathBuf::from(home)
+                .join(".config")
+                .join("kagi")
+                .join("kagi.toml"),
+        );
     }
     if let Some(appdata) = std::env::var_os("APPDATA") {
         out.push(PathBuf::from(appdata).join("kagi").join("kagi.toml"));
@@ -207,6 +199,24 @@ mod tests {
     use super::*;
     use crate::action::ImeState;
     use crate::keys::{Key, Mods};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Write `text` to a scratch file and load it the way kagi really does,
+    /// so the tests cover teravars rendering rather than bare serde.
+    fn load(text: &str) -> Result<Config> {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "kagi-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kagi.toml");
+        std::fs::write(&path, text).unwrap();
+        let loaded = Config::load(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        loaded
+    }
 
     const SAMPLE: &str = r#"
 [[rule]]
@@ -225,11 +235,17 @@ os = ["windows", "linux"]
 
     #[test]
     fn compiles_ahk_ruleset() {
-        let cfg = Config::parse(SAMPLE).unwrap();
+        let cfg = load(SAMPLE).unwrap();
         let rules = cfg.rules_for("windows").unwrap();
         assert_eq!(rules.len(), 3);
 
-        assert_eq!(rules[0].trigger, Chord { key: Key::LeftBracket, mods: Mods::CTRL });
+        assert_eq!(
+            rules[0].trigger,
+            Chord {
+                key: Key::LeftBracket,
+                mods: Mods::CTRL
+            }
+        );
         assert!(!rules[0].passthrough);
         assert_eq!(rules[0].actions[1], Action::Ime(ImeState::Off));
 
@@ -239,14 +255,14 @@ os = ["windows", "linux"]
 
     #[test]
     fn os_filter_drops_foreign_rules() {
-        let cfg = Config::parse(SAMPLE).unwrap();
+        let cfg = load(SAMPLE).unwrap();
         assert_eq!(cfg.rules_for("macos").unwrap().len(), 2);
         assert_eq!(cfg.rules_for("linux").unwrap().len(), 3);
     }
 
     #[test]
     fn prefixes_combine_in_either_order() {
-        let cfg = Config::parse(
+        let cfg = load(
             r#"
 [[rule]]
 from = "*~ctrl-["
@@ -262,7 +278,7 @@ from = "~*ctrl-["
 
     #[test]
     fn bad_rule_names_its_index() {
-        let cfg = Config::parse(
+        let cfg = load(
             r#"
 [[rule]]
 from = "esc"
@@ -277,14 +293,43 @@ from = "ctrl-nope"
 
     #[test]
     fn unknown_config_keys_are_rejected() {
-        assert!(Config::parse("[[rule]]\nfrom = \"esc\"\ntypo = 1\n").is_err());
-        assert!(Config::parse("[macos]\nime = \"nope\"\n").is_err());
+        assert!(load("[[rule]]\nfrom = \"esc\"\ntypo = 1\n").is_err());
+        assert!(load("[macos]\nime = \"nope\"\n").is_err());
     }
 
     #[test]
     fn macos_defaults_to_eisu() {
-        let cfg = Config::parse("").unwrap();
+        let cfg = load("").unwrap();
         assert_eq!(cfg.macos.ime, MacImeMethod::Eisu);
         assert_eq!(cfg.macos.ascii_source, "com.apple.keylayout.ABC");
+    }
+
+    #[test]
+    fn vars_and_system_context_render_before_parsing() {
+        // The reason the config goes through teravars at all: one file that
+        // adapts per machine instead of one file per machine.
+        let cfg = load(
+            r#"
+[vars]
+quit = "ctrl-q"
+
+[[rule]]
+from = "{{ vars.quit }}"
+to = ["cmd:pkill -f kagi on {{ system.os }}"]
+"#,
+        )
+        .unwrap();
+        let rules = cfg.rules_for(std::env::consts::OS).unwrap();
+        assert_eq!(
+            rules[0].trigger,
+            Chord {
+                key: Key::Q,
+                mods: Mods::CTRL
+            }
+        );
+        assert_eq!(
+            rules[0].actions[0],
+            Action::Cmd(format!("pkill -f kagi on {}", std::env::consts::OS))
+        );
     }
 }

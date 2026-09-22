@@ -35,10 +35,23 @@ cargo install kagikey    # the crate is `kagikey`; the binary is `kagi`
 cargo install --path .   # or from a checkout
 ```
 
+kagi keeps itself up to date in the background and exposes `kagi update`.
+Packagers who own updates themselves can drop that (and with it the
+reqwest/rustls tree) entirely:
+
+```sh
+cargo install kagikey --no-default-features
+```
+
 ## Configure
 
 kagi reads `$KAGI_CONFIG`, else `~/.config/kagi/kagi.toml`, else
 `%APPDATA%\kagi\kagi.toml`. See [`config/kagi.toml`](config/kagi.toml).
+
+The file is rendered by [teravars](https://github.com/yukimemi/teravars)
+before it is parsed, so one config can cover several machines: `[vars]` for
+your own values, `{{ system.os }}` / `{{ system.host }}` / `{{ system.user }}`
+for the machine, and `include` to pull in a shared fragment.
 
 ```toml
 [[rule]]
@@ -99,6 +112,7 @@ every platform.
 kagi run      # capture and remap (default)
 kagi check    # parse the config and print the rules that apply here
 kagi watch    # print key events as they arrive, to discover key names
+kagi update   # install the latest release (--check to only look)
 ```
 
 `kagi watch` is the way to find the name of a key your keyboard actually sends:

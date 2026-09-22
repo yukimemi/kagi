@@ -16,12 +16,12 @@ use crate::action::ImeState;
 use crate::config::{Config, MacImeMethod, MacosConfig};
 use crate::engine::{Decision, Engine};
 use crate::keys::{Chord, Key, Mods};
-use crate::platform::{dispatch, Emitter};
-use anyhow::{anyhow, bail, Result};
+use crate::platform::{Emitter, dispatch};
+use anyhow::{Result, anyhow, bail};
 use core_foundation::base::TCFType;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::mach_port::CFMachPortRef;
-use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop, CFRunLoopSource};
+use core_foundation::runloop::{CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes};
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation_sys::base::{Boolean, CFRelease, CFTypeRef, OSStatus};
@@ -54,12 +54,12 @@ const KCG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
 
 type CGEventTapProxy = *const c_void;
 type CGEventMask = u64;
-type TapCallback = unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void)
-    -> CGEventRef;
+type TapCallback =
+    unsafe extern "C" fn(CGEventTapProxy, u32, CGEventRef, *mut c_void) -> CGEventRef;
 type TISInputSourceRef = CFTypeRef;
 
 #[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CGEventTapCreate(
         tap: u32,
         place: u32,
@@ -72,12 +72,12 @@ extern "C" {
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn AXIsProcessTrusted() -> Boolean;
 }
 
 #[link(name = "Carbon", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn TISCopyCurrentKeyboardInputSource() -> TISInputSourceRef;
     fn TISCreateInputSourceList(properties: CFDictionaryRef, include_all: Boolean) -> CFArrayRef;
     fn TISSelectInputSource(source: TISInputSourceRef) -> OSStatus;
@@ -92,54 +92,127 @@ extern "C" {
 /// macOS virtual keycode -> `Key`.
 fn to_key(code: u16) -> Option<Key> {
     Some(match code {
-        0x00 => Key::A, 0x01 => Key::S, 0x02 => Key::D, 0x03 => Key::F,
-        0x04 => Key::H, 0x05 => Key::G, 0x06 => Key::Z, 0x07 => Key::X,
-        0x08 => Key::C, 0x09 => Key::V, 0x0B => Key::B, 0x0C => Key::Q,
-        0x0D => Key::W, 0x0E => Key::E, 0x0F => Key::R, 0x10 => Key::Y,
+        0x00 => Key::A,
+        0x01 => Key::S,
+        0x02 => Key::D,
+        0x03 => Key::F,
+        0x04 => Key::H,
+        0x05 => Key::G,
+        0x06 => Key::Z,
+        0x07 => Key::X,
+        0x08 => Key::C,
+        0x09 => Key::V,
+        0x0B => Key::B,
+        0x0C => Key::Q,
+        0x0D => Key::W,
+        0x0E => Key::E,
+        0x0F => Key::R,
+        0x10 => Key::Y,
         0x11 => Key::T,
 
-        0x12 => Key::Num1, 0x13 => Key::Num2, 0x14 => Key::Num3,
-        0x15 => Key::Num4, 0x16 => Key::Num6, 0x17 => Key::Num5,
-        0x19 => Key::Num9, 0x1A => Key::Num7, 0x1C => Key::Num8,
+        0x12 => Key::Num1,
+        0x13 => Key::Num2,
+        0x14 => Key::Num3,
+        0x15 => Key::Num4,
+        0x16 => Key::Num6,
+        0x17 => Key::Num5,
+        0x19 => Key::Num9,
+        0x1A => Key::Num7,
+        0x1C => Key::Num8,
         0x1D => Key::Num0,
 
-        0x18 => Key::Equal, 0x1B => Key::Minus,
-        0x1E => Key::RightBracket, 0x21 => Key::LeftBracket,
-        0x1F => Key::O, 0x20 => Key::U, 0x22 => Key::I, 0x23 => Key::P,
-        0x24 => Key::Enter, 0x25 => Key::L, 0x26 => Key::J,
-        0x27 => Key::Quote, 0x28 => Key::K, 0x29 => Key::Semicolon,
-        0x2A => Key::Backslash, 0x2B => Key::Comma, 0x2C => Key::Slash,
-        0x2D => Key::N, 0x2E => Key::M, 0x2F => Key::Period,
+        0x18 => Key::Equal,
+        0x1B => Key::Minus,
+        0x1E => Key::RightBracket,
+        0x21 => Key::LeftBracket,
+        0x1F => Key::O,
+        0x20 => Key::U,
+        0x22 => Key::I,
+        0x23 => Key::P,
+        0x24 => Key::Enter,
+        0x25 => Key::L,
+        0x26 => Key::J,
+        0x27 => Key::Quote,
+        0x28 => Key::K,
+        0x29 => Key::Semicolon,
+        0x2A => Key::Backslash,
+        0x2B => Key::Comma,
+        0x2C => Key::Slash,
+        0x2D => Key::N,
+        0x2E => Key::M,
+        0x2F => Key::Period,
 
-        0x30 => Key::Tab, 0x31 => Key::Space, 0x32 => Key::Grave,
-        0x33 => Key::Backspace, 0x35 => Key::Escape,
+        0x30 => Key::Tab,
+        0x31 => Key::Space,
+        0x32 => Key::Grave,
+        0x33 => Key::Backspace,
+        0x35 => Key::Escape,
 
-        0x36 => Key::RightMeta, 0x37 => Key::LeftMeta,
-        0x38 => Key::LeftShift, 0x39 => Key::CapsLock,
-        0x3A => Key::LeftAlt, 0x3B => Key::LeftCtrl,
-        0x3C => Key::RightShift, 0x3D => Key::RightAlt, 0x3E => Key::RightCtrl,
+        0x36 => Key::RightMeta,
+        0x37 => Key::LeftMeta,
+        0x38 => Key::LeftShift,
+        0x39 => Key::CapsLock,
+        0x3A => Key::LeftAlt,
+        0x3B => Key::LeftCtrl,
+        0x3C => Key::RightShift,
+        0x3D => Key::RightAlt,
+        0x3E => Key::RightCtrl,
 
-        0x40 => Key::F17, 0x4F => Key::F18, 0x50 => Key::F19, 0x5A => Key::F20,
-        0x60 => Key::F5, 0x61 => Key::F6, 0x62 => Key::F7, 0x63 => Key::F3,
-        0x64 => Key::F8, 0x65 => Key::F9, 0x67 => Key::F11, 0x69 => Key::F13,
-        0x6A => Key::F16, 0x6B => Key::F14, 0x6D => Key::F10, 0x6F => Key::F12,
-        0x71 => Key::F15, 0x76 => Key::F4, 0x78 => Key::F2, 0x7A => Key::F1,
+        0x40 => Key::F17,
+        0x4F => Key::F18,
+        0x50 => Key::F19,
+        0x5A => Key::F20,
+        0x60 => Key::F5,
+        0x61 => Key::F6,
+        0x62 => Key::F7,
+        0x63 => Key::F3,
+        0x64 => Key::F8,
+        0x65 => Key::F9,
+        0x67 => Key::F11,
+        0x69 => Key::F13,
+        0x6A => Key::F16,
+        0x6B => Key::F14,
+        0x6D => Key::F10,
+        0x6F => Key::F12,
+        0x71 => Key::F15,
+        0x76 => Key::F4,
+        0x78 => Key::F2,
+        0x7A => Key::F1,
 
-        0x41 => Key::NumpadDot, 0x43 => Key::NumpadMultiply,
-        0x45 => Key::NumpadPlus, 0x47 => Key::NumLock,
-        0x4B => Key::NumpadDivide, 0x4C => Key::NumpadEnter,
-        0x4E => Key::NumpadMinus, 0x51 => Key::NumpadEqual,
-        0x52 => Key::Numpad0, 0x53 => Key::Numpad1, 0x54 => Key::Numpad2,
-        0x55 => Key::Numpad3, 0x56 => Key::Numpad4, 0x57 => Key::Numpad5,
-        0x58 => Key::Numpad6, 0x59 => Key::Numpad7, 0x5B => Key::Numpad8,
+        0x41 => Key::NumpadDot,
+        0x43 => Key::NumpadMultiply,
+        0x45 => Key::NumpadPlus,
+        0x47 => Key::NumLock,
+        0x4B => Key::NumpadDivide,
+        0x4C => Key::NumpadEnter,
+        0x4E => Key::NumpadMinus,
+        0x51 => Key::NumpadEqual,
+        0x52 => Key::Numpad0,
+        0x53 => Key::Numpad1,
+        0x54 => Key::Numpad2,
+        0x55 => Key::Numpad3,
+        0x56 => Key::Numpad4,
+        0x57 => Key::Numpad5,
+        0x58 => Key::Numpad6,
+        0x59 => Key::Numpad7,
+        0x5B => Key::Numpad8,
         0x5C => Key::Numpad9,
 
-        0x5D => Key::IntlYen, 0x5E => Key::IntlRo,
-        0x66 => Key::Eisu, 0x68 => Key::Kana,
+        0x5D => Key::IntlYen,
+        0x5E => Key::IntlRo,
+        0x66 => Key::Eisu,
+        0x68 => Key::Kana,
 
-        0x72 => Key::Insert, 0x73 => Key::Home, 0x74 => Key::PageUp,
-        0x75 => Key::Delete, 0x77 => Key::End, 0x79 => Key::PageDown,
-        0x7B => Key::Left, 0x7C => Key::Right, 0x7D => Key::Down, 0x7E => Key::Up,
+        0x72 => Key::Insert,
+        0x73 => Key::Home,
+        0x74 => Key::PageUp,
+        0x75 => Key::Delete,
+        0x77 => Key::End,
+        0x79 => Key::PageDown,
+        0x7B => Key::Left,
+        0x7C => Key::Right,
+        0x7D => Key::Down,
+        0x7E => Key::Up,
 
         _ => return None,
     })
@@ -149,54 +222,127 @@ fn to_key(code: u16) -> Option<Key> {
 /// for (Windows/Linux-only names such as 変換 / 無変換).
 fn from_key(key: Key) -> Option<u16> {
     Some(match key {
-        Key::A => 0x00, Key::S => 0x01, Key::D => 0x02, Key::F => 0x03,
-        Key::H => 0x04, Key::G => 0x05, Key::Z => 0x06, Key::X => 0x07,
-        Key::C => 0x08, Key::V => 0x09, Key::B => 0x0B, Key::Q => 0x0C,
-        Key::W => 0x0D, Key::E => 0x0E, Key::R => 0x0F, Key::Y => 0x10,
+        Key::A => 0x00,
+        Key::S => 0x01,
+        Key::D => 0x02,
+        Key::F => 0x03,
+        Key::H => 0x04,
+        Key::G => 0x05,
+        Key::Z => 0x06,
+        Key::X => 0x07,
+        Key::C => 0x08,
+        Key::V => 0x09,
+        Key::B => 0x0B,
+        Key::Q => 0x0C,
+        Key::W => 0x0D,
+        Key::E => 0x0E,
+        Key::R => 0x0F,
+        Key::Y => 0x10,
         Key::T => 0x11,
 
-        Key::Num1 => 0x12, Key::Num2 => 0x13, Key::Num3 => 0x14,
-        Key::Num4 => 0x15, Key::Num6 => 0x16, Key::Num5 => 0x17,
-        Key::Num9 => 0x19, Key::Num7 => 0x1A, Key::Num8 => 0x1C,
+        Key::Num1 => 0x12,
+        Key::Num2 => 0x13,
+        Key::Num3 => 0x14,
+        Key::Num4 => 0x15,
+        Key::Num6 => 0x16,
+        Key::Num5 => 0x17,
+        Key::Num9 => 0x19,
+        Key::Num7 => 0x1A,
+        Key::Num8 => 0x1C,
         Key::Num0 => 0x1D,
 
-        Key::Equal => 0x18, Key::Minus => 0x1B,
-        Key::RightBracket => 0x1E, Key::LeftBracket => 0x21,
-        Key::O => 0x1F, Key::U => 0x20, Key::I => 0x22, Key::P => 0x23,
-        Key::Enter => 0x24, Key::L => 0x25, Key::J => 0x26,
-        Key::Quote => 0x27, Key::K => 0x28, Key::Semicolon => 0x29,
-        Key::Backslash => 0x2A, Key::Comma => 0x2B, Key::Slash => 0x2C,
-        Key::N => 0x2D, Key::M => 0x2E, Key::Period => 0x2F,
+        Key::Equal => 0x18,
+        Key::Minus => 0x1B,
+        Key::RightBracket => 0x1E,
+        Key::LeftBracket => 0x21,
+        Key::O => 0x1F,
+        Key::U => 0x20,
+        Key::I => 0x22,
+        Key::P => 0x23,
+        Key::Enter => 0x24,
+        Key::L => 0x25,
+        Key::J => 0x26,
+        Key::Quote => 0x27,
+        Key::K => 0x28,
+        Key::Semicolon => 0x29,
+        Key::Backslash => 0x2A,
+        Key::Comma => 0x2B,
+        Key::Slash => 0x2C,
+        Key::N => 0x2D,
+        Key::M => 0x2E,
+        Key::Period => 0x2F,
 
-        Key::Tab => 0x30, Key::Space => 0x31, Key::Grave => 0x32,
-        Key::Backspace => 0x33, Key::Escape => 0x35,
+        Key::Tab => 0x30,
+        Key::Space => 0x31,
+        Key::Grave => 0x32,
+        Key::Backspace => 0x33,
+        Key::Escape => 0x35,
 
-        Key::RightMeta => 0x36, Key::LeftMeta => 0x37,
-        Key::LeftShift => 0x38, Key::CapsLock => 0x39,
-        Key::LeftAlt => 0x3A, Key::LeftCtrl => 0x3B,
-        Key::RightShift => 0x3C, Key::RightAlt => 0x3D, Key::RightCtrl => 0x3E,
+        Key::RightMeta => 0x36,
+        Key::LeftMeta => 0x37,
+        Key::LeftShift => 0x38,
+        Key::CapsLock => 0x39,
+        Key::LeftAlt => 0x3A,
+        Key::LeftCtrl => 0x3B,
+        Key::RightShift => 0x3C,
+        Key::RightAlt => 0x3D,
+        Key::RightCtrl => 0x3E,
 
-        Key::F17 => 0x40, Key::F18 => 0x4F, Key::F19 => 0x50, Key::F20 => 0x5A,
-        Key::F5 => 0x60, Key::F6 => 0x61, Key::F7 => 0x62, Key::F3 => 0x63,
-        Key::F8 => 0x64, Key::F9 => 0x65, Key::F11 => 0x67, Key::F13 => 0x69,
-        Key::F16 => 0x6A, Key::F14 => 0x6B, Key::F10 => 0x6D, Key::F12 => 0x6F,
-        Key::F15 => 0x71, Key::F4 => 0x76, Key::F2 => 0x78, Key::F1 => 0x7A,
+        Key::F17 => 0x40,
+        Key::F18 => 0x4F,
+        Key::F19 => 0x50,
+        Key::F20 => 0x5A,
+        Key::F5 => 0x60,
+        Key::F6 => 0x61,
+        Key::F7 => 0x62,
+        Key::F3 => 0x63,
+        Key::F8 => 0x64,
+        Key::F9 => 0x65,
+        Key::F11 => 0x67,
+        Key::F13 => 0x69,
+        Key::F16 => 0x6A,
+        Key::F14 => 0x6B,
+        Key::F10 => 0x6D,
+        Key::F12 => 0x6F,
+        Key::F15 => 0x71,
+        Key::F4 => 0x76,
+        Key::F2 => 0x78,
+        Key::F1 => 0x7A,
 
-        Key::NumpadDot => 0x41, Key::NumpadMultiply => 0x43,
-        Key::NumpadPlus => 0x45, Key::NumLock => 0x47,
-        Key::NumpadDivide => 0x4B, Key::NumpadEnter => 0x4C,
-        Key::NumpadMinus => 0x4E, Key::NumpadEqual => 0x51,
-        Key::Numpad0 => 0x52, Key::Numpad1 => 0x53, Key::Numpad2 => 0x54,
-        Key::Numpad3 => 0x55, Key::Numpad4 => 0x56, Key::Numpad5 => 0x57,
-        Key::Numpad6 => 0x58, Key::Numpad7 => 0x59, Key::Numpad8 => 0x5B,
+        Key::NumpadDot => 0x41,
+        Key::NumpadMultiply => 0x43,
+        Key::NumpadPlus => 0x45,
+        Key::NumLock => 0x47,
+        Key::NumpadDivide => 0x4B,
+        Key::NumpadEnter => 0x4C,
+        Key::NumpadMinus => 0x4E,
+        Key::NumpadEqual => 0x51,
+        Key::Numpad0 => 0x52,
+        Key::Numpad1 => 0x53,
+        Key::Numpad2 => 0x54,
+        Key::Numpad3 => 0x55,
+        Key::Numpad4 => 0x56,
+        Key::Numpad5 => 0x57,
+        Key::Numpad6 => 0x58,
+        Key::Numpad7 => 0x59,
+        Key::Numpad8 => 0x5B,
         Key::Numpad9 => 0x5C,
 
-        Key::IntlYen => 0x5D, Key::IntlRo => 0x5E,
-        Key::Eisu => 0x66, Key::Kana => 0x68,
+        Key::IntlYen => 0x5D,
+        Key::IntlRo => 0x5E,
+        Key::Eisu => 0x66,
+        Key::Kana => 0x68,
 
-        Key::Insert => 0x72, Key::Home => 0x73, Key::PageUp => 0x74,
-        Key::Delete => 0x75, Key::End => 0x77, Key::PageDown => 0x79,
-        Key::Left => 0x7B, Key::Right => 0x7C, Key::Down => 0x7D, Key::Up => 0x7E,
+        Key::Insert => 0x72,
+        Key::Home => 0x73,
+        Key::PageUp => 0x74,
+        Key::Delete => 0x75,
+        Key::End => 0x77,
+        Key::PageDown => 0x79,
+        Key::Left => 0x7B,
+        Key::Right => 0x7C,
+        Key::Down => 0x7D,
+        Key::Up => 0x7E,
 
         _ => return None,
     })
@@ -274,7 +420,8 @@ fn ime_is_on() -> bool {
 fn select_input_source(id: &str) -> Result<()> {
     let key = // SAFETY: the Carbon global is a constant CFStringRef, Get rule.
         unsafe { CFString::wrap_under_get_rule(kTISPropertyInputSourceID) };
-    let props = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFString::new(id).as_CFType())]);
+    let props =
+        CFDictionary::from_CFType_pairs(&[(key.as_CFType(), CFString::new(id).as_CFType())]);
 
     // SAFETY: TISCreateInputSourceList follows the Create rule; the array and
     // its elements stay valid until the CFRelease below.
@@ -330,7 +477,10 @@ impl MacEmitter {
 impl Emitter for MacEmitter {
     fn tap(&mut self, chord: Chord) -> Result<()> {
         let code = from_key(chord.key).ok_or_else(|| {
-            anyhow!("`{}` has no macOS keycode; it is a Windows/Linux-only key", chord.key)
+            anyhow!(
+                "`{}` has no macOS keycode; it is a Windows/Linux-only key",
+                chord.key
+            )
         })?;
         // Flags travel inside the synthetic event, so a physically held
         // modifier cannot contaminate it the way it would on Windows/Linux.
@@ -351,7 +501,11 @@ impl Emitter for MacEmitter {
                 self.post(code, CGEventFlags::CGEventFlagNull)
             }
             MacImeMethod::Source => {
-                let id = if on { &self.cfg.japanese_source } else { &self.cfg.ascii_source };
+                let id = if on {
+                    &self.cfg.japanese_source
+                } else {
+                    &self.cfg.ascii_source
+                };
                 select_input_source(id)
             }
         }
@@ -465,7 +619,14 @@ impl Context {
                         }
                     }
                 } else {
-                    (if passthrough { Verdict::Keep } else { Verdict::Delete }, actions)
+                    (
+                        if passthrough {
+                            Verdict::Keep
+                        } else {
+                            Verdict::Delete
+                        },
+                        actions,
+                    )
                 };
 
                 if !rest.is_empty() {
@@ -495,10 +656,13 @@ unsafe extern "C" fn tap_callback(
     event_ref: CGEventRef,
     user_info: *mut c_void,
 ) -> CGEventRef {
-    let ctx = &mut *(user_info as *mut Context);
+    // SAFETY: `user_info` is the leaked `Context`; CoreGraphics serialises
+    // callbacks on the installing thread, so this `&mut` is unique.
+    let ctx = unsafe { &mut *(user_info as *mut Context) };
     // Borrowed, not owned: CoreGraphics still holds a reference, so the
     // wrapper must not run CFRelease on drop.
-    let event = ManuallyDrop::new(CGEvent::from_ptr(event_ref));
+    // SAFETY: `event_ref` is the live event CoreGraphics passed in.
+    let event = ManuallyDrop::new(unsafe { CGEvent::from_ptr(event_ref) });
     match ctx.handle(etype, &event) {
         Verdict::Keep => event_ref,
         // Returning NULL deletes the event from the stream.
@@ -572,7 +736,11 @@ fn context(engine: Engine, config: &Config) -> Result<Box<Context>> {
 
 pub fn run(engine: Engine, config: &Config) -> Result<()> {
     eprintln!("kagi: running (macOS event tap). Ctrl-C to stop.");
-    install(context(engine, config)?, KCG_EVENT_TAP_OPTION_DEFAULT, tap_callback)
+    install(
+        context(engine, config)?,
+        KCG_EVENT_TAP_OPTION_DEFAULT,
+        tap_callback,
+    )
 }
 
 pub fn watch(config: &Config) -> Result<()> {
@@ -593,13 +761,15 @@ unsafe extern "C" fn watch_callback(
     event_ref: CGEventRef,
     user_info: *mut c_void,
 ) -> CGEventRef {
-    let ctx = &mut *(user_info as *mut Context);
-    let event = ManuallyDrop::new(CGEvent::from_ptr(event_ref));
+    // SAFETY: same contract as `tap_callback` — leaked context, one thread.
+    let ctx = unsafe { &mut *(user_info as *mut Context) };
+    // SAFETY: `event_ref` is the live event CoreGraphics passed in.
+    let event = ManuallyDrop::new(unsafe { CGEvent::from_ptr(event_ref) });
 
-    if etype == KCG_EVENT_TAP_DISABLED_BY_TIMEOUT
-        || etype == KCG_EVENT_TAP_DISABLED_BY_USER_INPUT
-    {
-        CGEventTapEnable(ctx.tap, true);
+    if etype == KCG_EVENT_TAP_DISABLED_BY_TIMEOUT || etype == KCG_EVENT_TAP_DISABLED_BY_USER_INPUT {
+        // SAFETY: `ctx.tap` is the port from CGEventTapCreate, alive for the
+        // process lifetime.
+        unsafe { CGEventTapEnable(ctx.tap, true) };
         return event_ref;
     }
 
@@ -613,8 +783,15 @@ unsafe extern "C" fn watch_callback(
         KCG_EVENT_FLAGS_CHANGED => "flag",
         _ => return event_ref,
     };
-    let prefix = if mods.is_empty() { String::new() } else { format!("{mods}-") };
-    println!("{phase}  {prefix}{name:<18} (keycode=0x{code:02X} flags=0x{:X})", flags.bits());
+    let prefix = if mods.is_empty() {
+        String::new()
+    } else {
+        format!("{mods}-")
+    };
+    println!(
+        "{phase}  {prefix}{name:<18} (keycode=0x{code:02X} flags=0x{:X})",
+        flags.bits()
+    );
     event_ref
 }
 
@@ -647,7 +824,12 @@ mod tests {
 
     #[test]
     fn mods_survive_the_flag_round_trip() {
-        for mods in [Mods::empty(), Mods::CTRL, Mods::CTRL | Mods::SHIFT, Mods::all()] {
+        for mods in [
+            Mods::empty(),
+            Mods::CTRL,
+            Mods::CTRL | Mods::SHIFT,
+            Mods::all(),
+        ] {
             assert_eq!(mods_from_flags(flags_from_mods(mods)), mods);
         }
     }

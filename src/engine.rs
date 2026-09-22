@@ -37,7 +37,10 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(rules: Vec<Rule>) -> Engine {
-        Engine { rules, swallowed: HashSet::new() }
+        Engine {
+            rules,
+            swallowed: HashSet::new(),
+        }
     }
 
     pub fn actions(&self, index: usize) -> &[Action] {
@@ -48,7 +51,11 @@ impl Engine {
     /// event, excluding the event's own key.
     pub fn on_key(&mut self, key: Key, mods: Mods, down: bool) -> Decision {
         if !down {
-            return if self.swallowed.remove(&key) { Decision::Consume } else { Decision::Pass };
+            return if self.swallowed.remove(&key) {
+                Decision::Consume
+            } else {
+                Decision::Pass
+            };
         }
 
         for (index, rule) in self.rules.iter().enumerate() {
@@ -66,7 +73,10 @@ impl Engine {
             if !rule.passthrough {
                 self.swallowed.insert(key);
             }
-            return Decision::Run { index, passthrough: rule.passthrough };
+            return Decision::Run {
+                index,
+                passthrough: rule.passthrough,
+            };
         }
         Decision::Pass
     }
@@ -157,7 +167,10 @@ mod tests {
                 "ctrl-[",
                 false,
                 false,
-                vec![Action::Tap(Chord::parse("esc").unwrap()), Action::Ime(ImeState::Off)],
+                vec![
+                    Action::Tap(Chord::parse("esc").unwrap()),
+                    Action::Ime(ImeState::Off),
+                ],
             ),
             rule("esc", true, false, vec![Action::Ime(ImeState::Off)]),
             rule("henkan", true, false, vec![Action::Ime(ImeState::On)]),
@@ -170,11 +183,17 @@ mod tests {
         let mut e = ahk_equivalent();
         assert_eq!(
             e.on_key(Key::LeftBracket, Mods::CTRL, true),
-            Decision::Run { index: 0, passthrough: false }
+            Decision::Run {
+                index: 0,
+                passthrough: false
+            }
         );
         assert_eq!(
             e.actions(0),
-            &[Action::Tap(Chord::parse("esc").unwrap()), Action::Ime(ImeState::Off)]
+            &[
+                Action::Tap(Chord::parse("esc").unwrap()),
+                Action::Ime(ImeState::Off)
+            ]
         );
     }
 
@@ -182,9 +201,15 @@ mod tests {
     fn swallowed_key_up_never_reaches_the_app() {
         let mut e = ahk_equivalent();
         e.on_key(Key::LeftBracket, Mods::CTRL, true);
-        assert_eq!(e.on_key(Key::LeftBracket, Mods::CTRL, false), Decision::Consume);
+        assert_eq!(
+            e.on_key(Key::LeftBracket, Mods::CTRL, false),
+            Decision::Consume
+        );
         // Second release (already cleared) passes: no phantom swallow.
-        assert_eq!(e.on_key(Key::LeftBracket, Mods::CTRL, false), Decision::Pass);
+        assert_eq!(
+            e.on_key(Key::LeftBracket, Mods::CTRL, false),
+            Decision::Pass
+        );
     }
 
     #[test]
@@ -192,7 +217,10 @@ mod tests {
         let mut e = ahk_equivalent();
         assert_eq!(
             e.on_key(Key::Escape, Mods::empty(), true),
-            Decision::Run { index: 1, passthrough: true }
+            Decision::Run {
+                index: 1,
+                passthrough: true
+            }
         );
         assert_eq!(e.on_key(Key::Escape, Mods::empty(), false), Decision::Pass);
     }
@@ -200,15 +228,24 @@ mod tests {
     #[test]
     fn exact_mods_by_default_wildcard_when_asked() {
         let mut strict = ahk_equivalent();
-        assert_eq!(strict.on_key(Key::LeftBracket, Mods::CTRL | Mods::SHIFT, true), Decision::Pass);
-        assert_eq!(strict.on_key(Key::LeftBracket, Mods::empty(), true), Decision::Pass);
+        assert_eq!(
+            strict.on_key(Key::LeftBracket, Mods::CTRL | Mods::SHIFT, true),
+            Decision::Pass
+        );
+        assert_eq!(
+            strict.on_key(Key::LeftBracket, Mods::empty(), true),
+            Decision::Pass
+        );
 
         let mut loose = Engine::new(vec![rule("ctrl-[", false, true, vec![])]);
         assert!(matches!(
             loose.on_key(Key::LeftBracket, Mods::CTRL | Mods::SHIFT, true),
             Decision::Run { .. }
         ));
-        assert_eq!(loose.on_key(Key::LeftBracket, Mods::SHIFT, true), Decision::Pass);
+        assert_eq!(
+            loose.on_key(Key::LeftBracket, Mods::SHIFT, true),
+            Decision::Pass
+        );
     }
 
     #[test]
@@ -219,7 +256,10 @@ mod tests {
         ]);
         assert_eq!(
             e.on_key(Key::Escape, Mods::empty(), true),
-            Decision::Run { index: 0, passthrough: true }
+            Decision::Run {
+                index: 0,
+                passthrough: true
+            }
         );
     }
 

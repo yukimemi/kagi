@@ -14,8 +14,8 @@ use crate::action::ImeState;
 use crate::config::{Config, LinuxConfig};
 use crate::engine::{Decision, Engine, ModTracker};
 use crate::keys::{Chord, Key, Mods};
-use crate::platform::{dispatch, run_blocking, Emitter};
-use anyhow::{anyhow, bail, Context, Result};
+use crate::platform::{Emitter, dispatch, run_blocking};
+use anyhow::{Context, Result, anyhow, bail};
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
 use evdev::{AttributeSet, Device, EventType, InputEvent, Key as EvKey, Synchronization};
 use std::io;
@@ -196,12 +196,18 @@ const MOD_PREFERRED: [(Mods, EvKey); 4] = [
 
 /// evdev code -> `Key`.
 fn to_key(code: u16) -> Option<Key> {
-    KEY_MAP.iter().find(|(_, ev)| ev.code() == code).map(|(k, _)| *k)
+    KEY_MAP
+        .iter()
+        .find(|(_, ev)| ev.code() == code)
+        .map(|(k, _)| *k)
 }
 
 /// `Key` -> evdev code. `None` for the two macOS-only names.
 fn from_key(key: Key) -> Option<u16> {
-    KEY_MAP.iter().find(|(k, _)| *k == key).map(|(_, ev)| ev.code())
+    KEY_MAP
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, ev)| ev.code())
 }
 
 fn key_event(code: u16, value: i32) -> InputEvent {
@@ -233,12 +239,14 @@ fn event_index(path: &Path) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
+/// Devices that opened, paired with their path.
+type Opened = Vec<(PathBuf, Device)>;
+
 /// Open every `/dev/input/event*`. Returns the devices we could open plus the
 /// paths that were refused, so the caller can explain a permission problem.
-fn open_input_devices() -> Result<(Vec<(PathBuf, Device)>, Vec<PathBuf>)> {
+fn open_input_devices() -> Result<(Opened, Vec<PathBuf>)> {
     let dir = Path::new(INPUT_DIR);
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
 
     let mut paths = Vec::new();
     for entry in entries {
@@ -312,7 +320,11 @@ fn select_devices(selectors: &[String]) -> Result<Vec<Selected>> {
     } else {
         format!(
             "no input device matched devices = [{}] under [linux]",
-            selectors.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ")
+            selectors
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     };
     if seen.is_empty() {
@@ -485,7 +497,10 @@ impl<'a> Backend<'a> {
             return Ok(());
         }
         for event in batch.iter() {
-            if let Some(i) = MOD_SIDES.iter().position(|(ev, _)| ev.code() == event.code()) {
+            if let Some(i) = MOD_SIDES
+                .iter()
+                .position(|(ev, _)| ev.code() == event.code())
+            {
                 // Autorepeat (value 2) leaves the key held.
                 self.held[i] = event.value() != VALUE_UP;
             }

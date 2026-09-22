@@ -9,7 +9,7 @@ fn main() {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     #[link(name = "ApplicationServices", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn AXIsProcessTrusted() -> u8;
     }
 
