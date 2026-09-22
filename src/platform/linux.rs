@@ -16,8 +16,8 @@ use crate::engine::{Decision, Engine, ModTracker};
 use crate::keys::{Chord, Key, Mods};
 use crate::platform::{Emitter, dispatch, run_blocking};
 use anyhow::{Context, Result, anyhow, bail};
-use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
-use evdev::{AttributeSet, Device, EventType, InputEvent, Key as EvKey, Synchronization};
+use evdev::uinput::VirtualDevice;
+use evdev::{AttributeSet, Device, EventType, InputEvent, KeyCode as EvKey, SynchronizationCode};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -183,7 +183,7 @@ fn mod_sides() -> impl Iterator<Item = (usize, u16, Mods)> {
     MOD_SIDES
         .iter()
         .enumerate()
-        .filter_map(|(i, (ev, key))| key.mod_bit().map(|bit| (i, ev.code(), bit)))
+        .filter_map(|(i, (ev, key))| key.mod_bit().map(|bit| (i, ev.0, bit)))
 }
 
 /// Side synthesized when a chord wants a modifier nothing is holding.
@@ -196,22 +196,16 @@ const MOD_PREFERRED: [(Mods, EvKey); 4] = [
 
 /// evdev code -> `Key`.
 fn to_key(code: u16) -> Option<Key> {
-    KEY_MAP
-        .iter()
-        .find(|(_, ev)| ev.code() == code)
-        .map(|(k, _)| *k)
+    KEY_MAP.iter().find(|(_, ev)| ev.0 == code).map(|(k, _)| *k)
 }
 
 /// `Key` -> evdev code. `None` for the two macOS-only names.
 fn from_key(key: Key) -> Option<u16> {
-    KEY_MAP
-        .iter()
-        .find(|(k, _)| *k == key)
-        .map(|(_, ev)| ev.code())
+    KEY_MAP.iter().find(|(k, _)| *k == key).map(|(_, ev)| ev.0)
 }
 
 fn key_event(code: u16, value: i32) -> InputEvent {
-    InputEvent::new(EventType::KEY, code, value)
+    InputEvent::new(EventType::KEY.0, code, value)
 }
 
 // ---------------------------------------------------------------- devices
@@ -408,7 +402,7 @@ fn reader(mut device: Device, label: String, tx: Sender<Report>) {
             if kind == EventType::KEY {
                 packet.push(event);
             } else if kind == EventType::SYNCHRONIZATION
-                && event.code() == Synchronization::SYN_REPORT.0
+                && event.code() == SynchronizationCode::SYN_REPORT.0
                 && !packet.is_empty()
             {
                 // Only EV_KEY is remapped, so EV_MSC/EV_LED traffic is dropped
@@ -497,10 +491,7 @@ impl<'a> Backend<'a> {
             return Ok(());
         }
         for event in batch.iter() {
-            if let Some(i) = MOD_SIDES
-                .iter()
-                .position(|(ev, _)| ev.code() == event.code())
-            {
+            if let Some(i) = MOD_SIDES.iter().position(|(ev, _)| ev.0 == event.code()) {
                 // Autorepeat (value 2) leaves the key held.
                 self.held[i] = event.value() != VALUE_UP;
             }
@@ -613,8 +604,8 @@ impl Emitter for Backend<'_> {
         }
         for (bit, ev) in MOD_PREFERRED {
             if chord.mods.contains(bit) && !self.mod_held(bit) {
-                prelude.push(key_event(ev.code(), VALUE_DOWN));
-                restore.push(key_event(ev.code(), VALUE_UP));
+                prelude.push(key_event(ev.0, VALUE_DOWN));
+                restore.push(key_event(ev.0, VALUE_UP));
             }
         }
         restore.reverse();
@@ -725,7 +716,7 @@ pub fn run(mut engine: Engine, config: &Config) -> Result<()> {
             }
         }
     }
-    let virt = VirtualDeviceBuilder::new()
+    let virt = VirtualDevice::builder()
         .map_err(uinput_error)?
         .name(VIRTUAL_NAME)
         .with_keys(&keys)
