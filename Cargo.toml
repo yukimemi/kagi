@@ -41,7 +41,7 @@ self-update = ["dep:kaishin", "dep:tokio"]
 
 [dependencies]
 anyhow = "1"
-bitflags = "2"
+bitflags = "2.13.2"
 clap = { version = "4", features = ["derive"] }
 kaishin = { version = "0.7.5", optional = true }
 serde = { version = "1", features = ["derive"] }
