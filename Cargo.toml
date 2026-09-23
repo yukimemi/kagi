@@ -42,7 +42,7 @@ self-update = ["dep:kaishin", "dep:tokio"]
 [dependencies]
 anyhow = "1"
 bitflags = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 kaishin = { version = "0.7.5", optional = true }
 serde = { version = "1", features = ["derive"] }
 teravars = { version = "0.2.2", features = ["merge"] }
