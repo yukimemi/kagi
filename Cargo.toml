@@ -40,7 +40,7 @@ default = ["self-update"]
 self-update = ["dep:kaishin", "dep:tokio"]
 
 [dependencies]
-anyhow = "1"
+anyhow = "1.0.104"
 bitflags = "2"
 clap = { version = "4", features = ["derive"] }
 kaishin = { version = "0.7.5", optional = true }
