@@ -591,8 +591,6 @@ mod imp {
     }
 
     pub fn install(config: Option<&Path>) -> Result<()> {
-        kill_daemon();
-        remove_legacy_shim()?;
         let args = conhost_args(&exe()?, config);
 
         // `/SC ONLOGON` on the command line means "at logon of any user",
@@ -612,12 +610,19 @@ mod imp {
         );
         let _ = std::fs::remove_file(&xml_file);
         created?;
+
+        // Only now that the new task is registered is it safe to tear down
+        // the old state: an earlier failure (e.g. `/Create` denied) leaves
+        // whatever was already running or registered untouched instead of
+        // stranding the user with neither the old nor the new task.
+        let _ = kill_daemon();
+        remove_legacy_shim()?;
         println!("registered logon task `{TASK}`");
         start()
     }
 
     pub fn uninstall() -> Result<()> {
-        kill_daemon();
+        let _ = kill_daemon();
         run_quiet("schtasks", &["/Delete", "/TN", TASK, "/F"]);
         remove_legacy_shim()?;
         println!("removed logon task `{TASK}`");
@@ -632,15 +637,19 @@ mod imp {
 
     /// `schtasks /End` terminates only the task's own process — `conhost` —
     /// and leaves kagi running as an orphan. Kill every other `kagi.exe`
-    /// too; this process is excluded by PID.
-    fn kill_daemon() {
-        run_quiet("schtasks", &["/End", "/TN", TASK]);
+    /// too; this process is excluded by PID. The `/End` result is the one
+    /// that's interesting to `stop()` — it fails when the task isn't
+    /// registered or isn't running; the orphan sweep is best-effort cleanup
+    /// on top of that and stays quiet either way.
+    fn kill_daemon() -> Result<()> {
+        let ended = run("schtasks", &["/End", "/TN", TASK]);
         let not_self = format!("PID ne {}", std::process::id());
         run_quiet("taskkill", &["/F", "/IM", "kagi.exe", "/FI", &not_self]);
+        ended.map(|_| ())
     }
 
     pub fn stop() -> Result<()> {
-        kill_daemon();
+        kill_daemon()?;
         println!("stopped `{TASK}`");
         Ok(())
     }
