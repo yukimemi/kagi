@@ -44,7 +44,7 @@ anyhow = "1"
 bitflags = "2"
 clap = { version = "4", features = ["derive"] }
 kaishin = { version = "0.7.5", optional = true }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 teravars = { version = "0.2.2", features = ["merge"] }
 tokio = { version = "1.53.1", features = [
   "rt",
