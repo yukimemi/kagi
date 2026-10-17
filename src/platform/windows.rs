@@ -645,7 +645,7 @@ fn handle(message: u32, lparam: LPARAM) -> bool {
     };
     let extended = info.flags & LLKHF_EXTENDED != 0;
     // An unknown code is forwarded untouched.
-    let Some(key) = to_key(info.vkCode, info.scanCode, extended) else {
+    let Some(physical) = to_key(info.vkCode, info.scanCode, extended) else {
         return false;
     };
 
@@ -661,10 +661,23 @@ fn handle(message: u32, lparam: LPARAM) -> bool {
             return false;
         };
 
+        // Remap before anything else looks at the event, so modifier tracking
+        // and rule matching see the key the user means.
+        let Some(key) = state.engine.remap_event(physical, down) else {
+            return true;
+        };
+        let remapped = key != physical;
         state.emitter.held.update(key, down);
         let mods = track(&mut state.mods, key, down);
         match state.engine.on_key(key, mods, down) {
-            Decision::Pass => false,
+            // The original event names the wrong key, so a remapped event is
+            // always swallowed and re-injected as the key it stands for.
+            Decision::Pass => {
+                if remapped {
+                    inject(key, down);
+                }
+                remapped
+            }
             Decision::Consume => true,
             Decision::Run { index, passthrough } => {
                 let RunState {
@@ -673,10 +686,21 @@ fn handle(message: u32, lparam: LPARAM) -> bool {
                 if let Err(err) = dispatch(emitter, engine.actions(index)) {
                     eprintln!("kagi: {err:#}");
                 }
-                !passthrough
+                if passthrough && remapped {
+                    inject(key, down);
+                }
+                !passthrough || remapped
             }
         }
     })
+}
+
+/// Deliver one remapped transition. A failure is reported, not fatal: the hook
+/// must keep running, and the event is lost like any other blocked injection.
+fn inject(key: Key, down: bool) {
+    if let Err(err) = key_event(key, !down).and_then(|input| send(&[input])) {
+        eprintln!("kagi: {err:#}");
+    }
 }
 
 /// Print one event for `watch`, including codes kagi has no name for.
@@ -779,6 +803,13 @@ fn pump() -> Result<()> {
 // =============================================================================
 
 pub fn run(engine: Engine, _config: &Config) -> Result<()> {
+    for (from, to) in engine.remap_pairs() {
+        for key in [from, to] {
+            if from_key(key).is_none() {
+                bail!("remap `{from} -> {to}`: `{key}` has no Windows key code");
+            }
+        }
+    }
     RUN_STATE.with(|cell| {
         *cell.borrow_mut() = Some(RunState {
             engine,

@@ -1,8 +1,8 @@
 //! TOML config: parse, filter by OS, compile to engine rules.
 
 use crate::action::Action;
-use crate::engine::Rule;
-use crate::keys::Chord;
+use crate::engine::{Remap, Rule};
+use crate::keys::{Chord, Key};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,8 @@ pub struct Config {
     pub vars: toml::Table,
     #[serde(default)]
     pub rule: Vec<RuleSpec>,
+    #[serde(default)]
+    pub remap: Vec<RemapSpec>,
     // Each of these is read only by its own backend, so the other targets see
     // an unread field.
     #[serde(default)]
@@ -38,6 +40,20 @@ pub struct RuleSpec {
     pub to: Vec<String>,
     /// Restrict to these platforms (`macos`, `windows`, `linux`).
     /// Empty means every platform.
+    #[serde(default)]
+    pub os: Vec<String>,
+    #[serde(default)]
+    pub desc: Option<String>,
+}
+
+/// Replace one key by another before rules see it: `capslock -> leftctrl`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemapSpec {
+    /// A single key name; modifiers and `~`/`*` prefixes are not allowed.
+    pub from: String,
+    pub to: String,
+    /// Restrict to these platforms, as for `[[rule]]`.
     #[serde(default)]
     pub os: Vec<String>,
     #[serde(default)]
@@ -121,6 +137,42 @@ impl Config {
         }
         Ok(out)
     }
+
+    /// Compile the key replacements that apply to the running platform.
+    ///
+    /// Rejected rather than guessed at: a key remapped twice, a remap onto a
+    /// key that is itself remapped (a chain would depend on evaluation order),
+    /// and a remap onto itself.
+    pub fn remaps_for(&self, os: &str) -> Result<Vec<Remap>> {
+        let mut out: Vec<Remap> = Vec::new();
+        for (i, spec) in self.remap.iter().enumerate() {
+            if !spec.os.is_empty() && !spec.os.iter().any(|o| o.eq_ignore_ascii_case(os)) {
+                continue;
+            }
+            let remap = spec
+                .compile()
+                .with_context(|| format!("remap #{} (`{} -> {}`)", i + 1, spec.from, spec.to))?;
+            if out.iter().any(|r| r.from == remap.from) {
+                bail!(
+                    "remap #{}: `{}` is remapped more than once",
+                    i + 1,
+                    spec.from
+                );
+            }
+            out.push(remap);
+        }
+        for remap in &out {
+            if out.iter().any(|other| other.from == remap.to) {
+                bail!(
+                    "remap `{} -> {}`: `{}` is itself remapped; chained remaps are not supported",
+                    remap.from,
+                    remap.to,
+                    remap.to
+                );
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl RuleSpec {
@@ -153,6 +205,26 @@ impl RuleSpec {
             wildcard_mods,
             passthrough,
             actions,
+            description: self.desc.clone(),
+        })
+    }
+}
+
+impl RemapSpec {
+    fn compile(&self) -> Result<Remap> {
+        let key = |name: &str| {
+            Key::parse(name.trim()).with_context(|| {
+                format!("`{name}` is not a single key name (modifiers and `~`/`*` do not apply to remaps)")
+            })
+        };
+        let from = key(&self.from)?;
+        let to = key(&self.to)?;
+        if from == to {
+            bail!("`{}` is remapped onto itself", self.from);
+        }
+        Ok(Remap {
+            from,
+            to,
             description: self.desc.clone(),
         })
     }
@@ -331,5 +403,50 @@ to = ["cmd:pkill -f kagi on {{ system.os }}"]
             rules[0].actions[0],
             Action::Cmd(format!("pkill -f kagi on {}", std::env::consts::OS))
         );
+    }
+
+    #[test]
+    fn remap_compiles_and_honours_os() {
+        let cfg = load(
+            r#"
+[[remap]]
+from = "capslock"
+to = "lctrl"
+os = ["linux", "windows"]
+"#,
+        )
+        .unwrap();
+        let remaps = cfg.remaps_for("linux").unwrap();
+        assert_eq!(remaps.len(), 1);
+        assert_eq!(
+            (remaps[0].from, remaps[0].to),
+            (Key::CapsLock, Key::LeftCtrl)
+        );
+        assert!(cfg.remaps_for("macos").unwrap().is_empty());
+    }
+
+    #[test]
+    fn remap_rejects_ambiguous_or_meaningless_definitions() {
+        let err =
+            |text: &str| format!("{:#}", load(text).unwrap().remaps_for("linux").unwrap_err());
+
+        // Same source twice: which one wins would depend on file order.
+        let twice = err(
+            "[[remap]]\nfrom=\"capslock\"\nto=\"lctrl\"\n[[remap]]\nfrom=\"capslock\"\nto=\"lalt\"\n",
+        );
+        assert!(twice.contains("more than once"), "{twice}");
+
+        // A chain: capslock -> lctrl -> lalt would depend on evaluation order.
+        let chain = err(
+            "[[remap]]\nfrom=\"capslock\"\nto=\"lctrl\"\n[[remap]]\nfrom=\"lctrl\"\nto=\"lalt\"\n",
+        );
+        assert!(chain.contains("chained"), "{chain}");
+
+        let itself = err("[[remap]]\nfrom=\"capslock\"\nto=\"capslock\"\n");
+        assert!(itself.contains("onto itself"), "{itself}");
+
+        // A chord is not a key: `ctrl-a` here would silently mean nothing.
+        let chord = err("[[remap]]\nfrom=\"capslock\"\nto=\"ctrl-a\"\n");
+        assert!(chord.contains("not a single key"), "{chord}");
     }
 }
