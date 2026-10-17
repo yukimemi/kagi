@@ -1318,6 +1318,14 @@ fn context(engine: Engine, config: &Config) -> Result<Box<Context>> {
 }
 
 pub fn run(engine: Engine, config: &Config) -> Result<()> {
+    if let Some((from, to)) = engine.remap_pairs().next() {
+        bail!(
+            "remap `{from} -> {to}` is not supported on macOS: Caps Lock and the other \
+             modifiers reach the event tap as flag changes, not key events. Remap modifier \
+             keys in System Settings > Keyboard > Keyboard Shortcuts > Modifier Keys, or \
+             limit the `[[remap]]` to other platforms with `os = [\"linux\", \"windows\"]`."
+        );
+    }
     eprintln!("kagi: running (macOS event tap). Ctrl-C to stop.");
     install(
         context(engine, config)?,

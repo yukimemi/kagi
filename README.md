@@ -106,6 +106,31 @@ An empty `to` swallows the key.
 `os = ["windows", "linux"]` restricts a rule to those platforms. Omit it for
 every platform.
 
+### `[[remap]]`
+
+Replaces one key with another before any rule or modifier tracking sees it:
+
+```toml
+[[remap]]
+desc = "Caps Lock acts as Left Ctrl"
+from = "capslock"
+to = "lctrl"
+os = ["linux", "windows"]
+```
+
+Because modifier state is derived from the remapped keys, the replacement
+behaves like the real key: `ctrl-[` rules fire while you hold Caps Lock. This
+is what lets a Caps-as-Ctrl setup work on a remapper that reads raw key events
+(on Linux, kagi sees evdev codes, below the desktop's own `ctrl:nocaps`).
+
+`from` and `to` are single key names: no modifiers, no `~`/`*`. A key can be
+remapped once, a remap cannot target a key that is itself remapped (no chains),
+and `from = to` is rejected.
+
+macOS is not supported: modifier keys reach the event tap as flag changes, so
+`kagi run` refuses a `[[remap]]` that applies there. Use System Settings ▸
+Keyboard ▸ Keyboard Shortcuts ▸ Modifier Keys, or restrict the entry with `os`.
+
 ## Commands
 
 ```sh

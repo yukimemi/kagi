@@ -111,8 +111,10 @@ fn main() -> Result<()> {
                     Some(p) => p.clone(),
                     None => config::default_path()?,
                 };
-                Config::load(&path)?
-                    .rules_for(std::env::consts::OS)
+                let cfg = Config::load(&path)?;
+                cfg.rules_for(std::env::consts::OS)
+                    .with_context(|| format!("compiling {}", path.display()))?;
+                cfg.remaps_for(std::env::consts::OS)
                     .with_context(|| format!("compiling {}", path.display()))?;
                 service::install(cli.config.as_deref())?;
                 // The service will fail until the OS grants capture, so ask
@@ -140,6 +142,9 @@ fn main() -> Result<()> {
     let cfg = Config::load(&path)?;
     let rules = cfg
         .rules_for(std::env::consts::OS)
+        .with_context(|| format!("compiling {}", path.display()))?;
+    let remaps = cfg
+        .remaps_for(std::env::consts::OS)
         .with_context(|| format!("compiling {}", path.display()))?;
 
     match cli.command.unwrap_or(Command::Run) {
@@ -172,18 +177,28 @@ fn main() -> Result<()> {
                     None => println!(),
                 }
             }
+            if !remaps.is_empty() {
+                println!("{} remap(s) for {}", remaps.len(), std::env::consts::OS);
+                for remap in &remaps {
+                    print!("  {} => {}", remap.from, remap.to);
+                    match &remap.description {
+                        Some(d) => println!("   # {d}"),
+                        None => println!(),
+                    }
+                }
+            }
             Ok(())
         }
         Command::Watch => platform::watch(&cfg),
         Command::Run => {
-            if rules.is_empty() {
+            if rules.is_empty() && remaps.is_empty() {
                 eprintln!("kagi: no rules for {}; nothing to do", std::env::consts::OS);
             }
             // `run` never returns, so a "new version available" banner would
             // never print. Update silently instead; it applies next launch.
             #[cfg(feature = "self-update")]
             updater::spawn_auto_update();
-            platform::run(Engine::new(rules), &cfg)
+            platform::run(Engine::new(rules).with_remaps(&remaps), &cfg)
         }
         // Handled before the config is loaded.
         Command::Service { .. } | Command::Permissions { .. } => unreachable!("dispatched above"),

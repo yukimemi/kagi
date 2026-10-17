@@ -11,6 +11,9 @@
 #   ime:on | ime:off | ime:toggle
 #   source:<input source id>  macOS TIS id / Linux IME engine name
 #   cmd:<shell command>
+#
+# `[[remap]]` replaces one key by another before rules see it (Linux/Windows):
+#   from = "capslock", to = "lctrl"
 
 [[rule]]
 desc = "Ctrl+[ -> Esc, and close the IME"

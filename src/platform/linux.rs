@@ -699,6 +699,15 @@ fn shell_quote(s: &str) -> String {
 // ---------------------------------------------------------------- entry points
 
 pub fn run(mut engine: Engine, config: &Config) -> Result<()> {
+    for (from, to) in engine.remap_pairs() {
+        for key in [from, to] {
+            if from_key(key).is_none() {
+                bail!(
+                    "remap `{from} -> {to}`: `{key}` is a macOS-only key name with no evdev equivalent"
+                );
+            }
+        }
+    }
     let devices = select_devices(&config.linux.devices)?;
 
     // The virtual device must advertise every key it will ever emit: what kagi
@@ -754,11 +763,21 @@ fn pump(engine: &mut Engine, backend: &mut Backend<'_>, rx: Receiver<Report>) ->
             }
         };
         for event in packet {
-            let down = event.value() != VALUE_UP;
-            let Some(key) = to_key(event.code()) else {
+            let Some(physical) = to_key(event.code()) else {
                 // Unknown to kagi: forward verbatim.
                 pending.push(event);
                 continue;
+            };
+            // Remap before anything else looks at the event, so modifier
+            // tracking and rule matching see the key the user means.
+            let down = event.value() != VALUE_UP;
+            let Some(key) = engine.remap_event(physical, down) else {
+                continue;
+            };
+            let event = if key == physical {
+                event
+            } else {
+                rewrite_event(&event, key)
             };
             // The engine wants the state *excluding* this event's own key, so
             // sample before a press and after a release.
@@ -787,6 +806,13 @@ fn pump(engine: &mut Engine, backend: &mut Backend<'_>, rx: Receiver<Report>) ->
         backend.forward(&mut pending)?;
     }
     Ok(())
+}
+
+/// The same transition (press, release, autorepeat) on another key.
+/// `from_key` was checked for every remap target in [`run`].
+fn rewrite_event(event: &InputEvent, to: Key) -> InputEvent {
+    let code = from_key(to).expect("remap targets are validated at startup");
+    key_event(code, event.value())
 }
 
 pub fn watch(config: &Config) -> Result<()> {
