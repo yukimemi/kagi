@@ -1,19 +1,19 @@
 preset = "github.com/yukimemi/pj-presets:rust-cli"
-applied_at = "2026-09-23T22:58:37.622240478Z"
+applied_at = "2026-10-29T03:23:27.871562743Z"
 
 [[templates]]
 source = "github.com/yukimemi/pj-base"
-rev = "b97e6bd59845f1151a1e34fdc508dafa751af7c8"
+rev = "319784779fae0b010db4973f99fe2a967e0122c7"
 version = "0.18.0"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust"
-rev = "324a00b775447fe8217bcb4717b5cc24cfc23c8f"
+rev = "45c10dec08dc12c48d3d0521b68d6ac481362ee8"
 version = "0.8.1"
 
 [[templates]]
 source = "github.com/yukimemi/pj-rust-cli"
-rev = "417d0d7c550cca1adeff701fa18325e86596fd7d"
+rev = "2a08932dda2b4833e53ba877af5e9e86cee1989b"
 version = "0.5.0"
 
 [files.".agents/skills/renri/SKILL.md"]
@@ -38,19 +38,19 @@ content_hash = "0ac5ed2847ab6e1041e34209dcc2396a582722ea9537d03bd950e1db1851a4b7
 content_hash = "4e2735f40c2ae61014810159a2458da2edc1646589f5f65d9f2f3d099366c9a8"
 
 [files.".github/workflows/ci.yml"]
-content_hash = "4aae1c2f39d146003164245b2da6e1d75a8668dc227f1851db6082481ebe515a"
+content_hash = "8a53e46d208f472b95504f9d3c8951b7b7daccbbb222469a87a7df93059b4289"
 
 [files.".github/workflows/kata-apply.yml"]
 content_hash = "7000353151b01b5d14cb8f56e314b1a25b020e22bdf5842dcaf5686efb59facb"
 
 [files.".github/workflows/release.yml"]
-content_hash = "9589a591b96282bb9b9aa7b8fd94a3cb2c327e23bafca27dcb175660af49ee90"
+content_hash = "64993d6c21714f1bf4794bf04b09f313b87cc611f9df246e70cdeac3066ae217"
 
 [files.".gitignore"]
 content_hash = "4bebd1c3417c33f9d1c51f011694f6d82b098bbb1a5a102ba56e97ab01a866ef"
 
 [files.".kata/vars.toml"]
-content_hash = "af314f0c7f556a719d63a9226662b6aac209d0faef32cd384768e0e7cd498676"
+content_hash = "8cc3225f71bba076eaee1a4f5b26cef72348dfe37e539e94a95f3544a4cea4b6"
 once_applied = true
 
 [files."AGENTS.md"]
@@ -63,7 +63,7 @@ content_hash = "3670f70a2f0be4013926bab6e878b90a42ad64c17899080aef4d193b246fa390
 once_applied = true
 
 [files."Makefile.toml"]
-content_hash = "73bb6f6eb0f7e9121db5d29d41c6be1d2255600568a961d23529ff69f5bf9c73"
+content_hash = "9e528d80af47ff6909c459308ece1cd6d37c83400281984af3ac769963909b01"
 
 [files."OPENCODE.md"]
 content_hash = "11993dc7feec5fca8e83934f135de33879b88f100c48aeba0729de2f57a11a48"
