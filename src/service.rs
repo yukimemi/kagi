@@ -557,9 +557,10 @@ mod imp {
     }
 
     /// Logon task for `user` only, running unelevated in the interactive
-    /// session. `ExecutionTimeLimit = PT0S` matters: the default would kill
-    /// the daemon after 72 hours, and the battery defaults would stop it on
-    /// unplug.
+    /// session. Delay the logon trigger to let the desktop settle before
+    /// installing the keyboard hook; manual starts remain immediate.
+    /// `ExecutionTimeLimit = PT0S` avoids the default 72-hour runtime limit,
+    /// and the battery defaults would stop the daemon on unplug.
     fn task_xml(user: &str, args: &str) -> String {
         let user = xml_escape(user);
         let args = xml_escape(args);
@@ -567,7 +568,7 @@ mod imp {
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId><Delay>PT30S</Delay></LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
