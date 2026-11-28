@@ -162,7 +162,7 @@ of it needs root.
 |---|---|---|
 | macOS | launchd LaunchAgent | `ProcessType = Interactive` keeps launchd from throttling keyboard handling behind background QoS |
 | Linux | systemd user unit, `PartOf=graphical-session.target` | kagi *grabs* evdev devices, so it has to come up and go down with the session; a `.desktop` autostart entry gives no ordering and no restart-on-failure |
-| Windows | logon scheduled task driving a `wscript` shim | a console binary launched from the Startup folder leaves a window on screen for as long as the daemon runs |
+| Windows | logon scheduled task running `conhost --headless` | a console binary launched from the Startup folder leaves a window on screen for as long as the daemon runs |
 
 `install` compiles your config first and refuses to register a service that
 would die on startup. Pass `--config` to bake a non-default path into the
@@ -170,6 +170,10 @@ registration.
 
 `kagi service status` reports registration and run state; `uninstall`,
 `start` and `stop` do what they say.
+
+On Windows the logon trigger waits 30 seconds for the interactive desktop
+to settle before starting kagi. Manual starts are immediate. Run
+`kagi service install` again after updating to refresh an existing task.
 
 ### macOS permissions
 
