@@ -279,6 +279,36 @@ cargo-nextest falls back to `cargo test` with a warning. Don't opt
 in where CI runs plain `cargo test`: the local gate has to run the
 tests the way CI does.
 
+`PJ_RUST_TEST_RUNNER = "nextest-unit"` goes further: lib / bin /
+integration tests all run under nextest
+(`kind(lib) | kind(bin) | kind(test)`, empty sets pass, so bin-only
+crates work) and examples / benches run once through
+`cargo test --examples --benches`. Cargo's `--benches` target selection
+can include the lib / bin benchmark harnesses, so unit tests may run
+again under Cargo even after nextest has run them. Without cargo-nextest
+the task warns and runs `cargo test --locked --all-targets`. Adopt it in
+two places that must carry the same value:
+
+1. the repo's Makefile.toml `[env]` (`PJ_RUST_TEST_RUNNER = "nextest-unit"`);
+2. `.kata/vars.toml`, top level (`PJ_RUST_TEST_RUNNER = "nextest-unit"`),
+   which switches the rendered `ci.yml` test jobs. Unset or any other
+   value renders the unchanged plain `cargo test` workflow.
+
+The repo also needs a `ci` profile in `.config/nextest.toml` that writes
+JUnit (`[profile.ci.junit]` with `path = "junit.xml"`, giving
+`target/nextest/ci/junit.xml`; uploaded as a non-fatal artifact). The
+rendered CI runs lib/bin/integration in one nextest run on Linux and
+macOS; on Windows it splits into `test-windows-unit` (lib/bin,
+examples/benches, doc tests) and three integration-only
+`test-windows-shard` jobs, with the required check `test (windows-latest)`
+aggregating them (failed, cancelled or skipped parts fail it). Only opt in
+when every unit test tolerates one process per test (no shared
+process-wide state). A repo with its own hand-maintained CI (not rendered
+from this template) must mirror the split manually. Magi ignores the
+rendered CI path and maintains its own workflow; do not overwrite it
+with the rendered template. Adopt the local runner and the matching
+manual CI split together as a separate, synchronized change.
+
 ### Toolchain pin
 
 The Rust toolchain is pinned via `rust-toolchain.toml` and the
@@ -417,16 +447,42 @@ a **CLI** crate:
 
 Set the `CARGO_REGISTRY_TOKEN` secret once per repo (`gh secret
 set CARGO_REGISTRY_TOKEN`) before the first release. If the
-crate is internal-only and shouldn't go to crates.io, either drop
-the `publish` job locally (release.yml is `when = "once"` so the
-edit survives subsequent applies) or set `package.publish = false`
-in `Cargo.toml`.
+crate is internal-only and shouldn't go to crates.io, set
+`package.publish = false` in `Cargo.toml`. The workflow is
+`when = "always"`: `kata apply` overwrites local workflow edits.
 
 The binary name is derived from the GitHub repo name at runtime
 (`${{ github.event.repository.name }}`), so the workflow is
 identical across CLIs using these templates unless your `[[bin]] name` in
 `Cargo.toml` deliberately differs from the repo name — in that
 case override `BIN_NAME` in the workflow's `env:` block.
+
+### Optional release signing hook
+
+Consumers can provide `scripts/ci/release-post-build.sh`. The workflow
+invokes it with Bash and a subcommand on every matrix target:
+
+1. `sign` runs after smoke and before either OS packaging step.
+2. `verify-dist` runs after packaging and before artifact upload.
+
+Both calls receive `TARGET` (the full target triple) and the workflow's
+`BIN_NAME`. Only `sign` receives the `MACOS_SIGN_CERT_P12_BASE64` and
+`MACOS_SIGN_CERT_PASSWORD` repository secrets. `verify-dist` must verify
+the archives in `dist/` without signing credentials. A failing hook
+blocks subsequent packaging or upload through normal step failure.
+
+The presence of `deploy/macos/signing-cert.sha1` opts into required
+signing integration: a missing hook fails immediately after smoke.
+Keep this certificate pin under version control. Without a pin, a
+present hook still runs; projects with neither file keep the ordinary
+unsigned release flow. The consumer hook owns target-specific policy,
+certificate pin validation, and failure on missing signing credentials
+for targets that require signing. It must implement both subcommands
+and safely handle targets where signing does not apply.
+
+The workflow and this guidance regenerate on `kata apply` because
+their manifest entries use `when = "always"`. Put signing policy in
+the consumer hook and pin rather than editing the generated workflow.
 
 ### Release smoke target (`examples/smoke.rs`)
 
